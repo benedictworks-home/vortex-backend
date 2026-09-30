@@ -15,7 +15,9 @@ import {
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
 } from "../config/limits.config";
 import configuration, { AppConfig } from "../config/configuration";
-import { verifyHs256Jwt } from "../common/jwt";
+import { sep10JwtPublicKey } from "../auth/sep10/sep10-keys";
+import { verifyEddsaJwt, verifyHs256Jwt } from "../common/jwt";
+import type { KeyObject } from "node:crypto";
 import { Backplane, SequencedEvent, WS_BACKPLANE } from "./backplane/backplane.types";
 import { MemoryBackplane } from "./backplane/memory.backplane";
 import { ConnectionState, resolveClientIp, EncodingFormat } from "./ws/connection-state";
@@ -58,6 +60,8 @@ export class IntentsGateway
   private heartbeatTimer: any;
   private readonly wsConfig: AppConfig["ws"];
   private readonly jwtSecret: string;
+  /** Public half of `SEP10_JWT_SIGNING_KEY` — verifies SEP-10 session JWTs (#442). */
+  private readonly sep10PublicKey: KeyObject | null;
 
   /** Fan-out + global sequencing (issue #454): memory or Redis Streams. */
   private readonly backplane: Backplane;
@@ -94,6 +98,10 @@ export class IntentsGateway
     const defaults = configuration();
     this.wsConfig = config?.get("ws", { infer: true }) ?? defaults.ws;
     this.jwtSecret = config?.get("authJwtSecret", { infer: true }) ?? defaults.authJwtSecret;
+    this.sep10PublicKey = sep10JwtPublicKey(
+      config?.get("stellar.signerSecretKey", { infer: true }) ?? defaults.stellar.signerSecretKey,
+      config?.get("sep10JwtSigningKey", { infer: true }) ?? defaults.sep10JwtSigningKey,
+    );
     this.heartbeatIntervalMs = resolveHeartbeatIntervalMs();
     this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatIntervalMs);
     this.backplane = this.createBackplane();
@@ -663,10 +671,16 @@ export class IntentsGateway
   }
 
   /**
-   * Authenticates with a solver JWT from the SEP-10 flow (issue #455 / #442).
+   * Authenticates with a session JWT from the SEP-10 flow (issue #442/#455).
+   *
+   * EdDSA tokens issued by `POST /api/v1/auth/token` are tried first; the
+   * legacy HS256 token (`AUTH_JWT_SECRET`) remains accepted so existing
+   * deployments keep working.
    */
   private async authenticateJwt(client: WebSocket, token: string): Promise<void> {
-    const claims = verifyHs256Jwt(token, this.jwtSecret);
+    const claims =
+      (this.sep10PublicKey ? verifyEddsaJwt(token, this.sep10PublicKey) : null) ??
+      verifyHs256Jwt(token, this.jwtSecret);
     if (!claims) {
       this.send(client, JSON.stringify({ type: "auth_error", reason: "invalid or expired token" }));
       return;

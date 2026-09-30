@@ -302,6 +302,14 @@ export interface AppConfig {
   };
   /** HS256 secret for solver JWTs (SEP-10 auth, #442); empty disables JWT auth. */
   authJwtSecret: string;
+  /** SEP-10 challenge home domain; also used as the web_auth_domain value (#442). */
+  sep10HomeDomain: string;
+  /** Ed25519 PKCS#8 key signing SEP-10 session JWTs (#442); distinct from the Soroban signer. */
+  sep10JwtSigningKey: string;
+  /** Comma-separated G-addresses granted role=admin in issued JWTs (#442). */
+  sep10AdminAccounts: string;
+  /** Backing store for single-use SEP-10 challenge nonces (#442). */
+  sep10NonceStore: "memory" | "redis";
   /**
    * How often (ms) the local rate-limiter fallback prunes expired window
    * entries (issue #441). Only relevant during a Redis outage.
@@ -482,6 +490,11 @@ export default (): AppConfig => ({
     drainTimeoutMs: parseInt(process.env.WS_DRAIN_TIMEOUT_MS ?? "25000", 10),
   },
   authJwtSecret: process.env.AUTH_JWT_SECRET ?? "",
+  // ── SEP-10 solver authentication (issue #442) ─────────────────────────────
+  sep10HomeDomain: process.env.SEP10_HOME_DOMAIN ?? "localhost",
+  sep10JwtSigningKey: process.env.SEP10_JWT_SIGNING_KEY ?? "",
+  sep10AdminAccounts: process.env.SEP10_ADMIN_ACCOUNTS ?? "",
+  sep10NonceStore: (process.env.SEP10_NONCE_STORE ?? "memory") as "memory" | "redis",
   rateLimitLocalPruneMs: parseInt(process.env.RATE_LIMIT_LOCAL_PRUNE_MS ?? "60000", 10),
   // Redis URL for the distributed rate limiter. Defaults to REDIS_URL so an
   // existing multi-replica deployment keeps a global quota; set it explicitly

@@ -106,6 +106,9 @@ export const BASE_FEE = real.BASE_FEE;
 // `new StellarSdk.Horizon.Server(...)`). Without these the mock leaves
 // `StellarSdk.Horizon` undefined and every e2e suite that boots the app fails.
 export const Horizon = real.Horizon;
+// SEP-10 challenge builders/verifiers (issue #442) — genuine SDK, only
+// SorobanRpc is stubbed above.
+export const WebAuth = real.WebAuth;
 export const Utils = real.Utils;
 export const Config = real.Config;
 export const MuxedAccount = real.MuxedAccount;

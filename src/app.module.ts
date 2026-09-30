@@ -23,6 +23,7 @@ import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
 import { AbuseModule } from "./abuse/abuse.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
+import { Sep10Module } from "./auth/sep10/sep10.module";
 import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
 
 @Module({
@@ -44,6 +45,9 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     PrismaModule,
     // Issue #441 — API key tiers + distributed rate limiting.
     ApiKeysModule,
+    // Issue #442 — SEP-10 challenge auth: challenge/token endpoints plus the
+    // key material the WS gateway and JWT guards use to verify issued tokens.
+    Sep10Module,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
     // for the whole app. Must be imported once in the root module or the global
     // providers never become visible to other modules (e.g. IntentsSweeperService)
