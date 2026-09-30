@@ -31,10 +31,6 @@ import {
 import { isCanaryIntent } from "../common/canary";
 import { AppConfig } from "../config/configuration";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
-import { ListIntentsDto } from "../intents/dto/list-intents.dto";
-import { AppConfig } from "../config/configuration";
-import { isCanaryIntent } from "../common/canary";
-import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
