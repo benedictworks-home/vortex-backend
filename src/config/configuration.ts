@@ -315,6 +315,25 @@ export interface AppConfig {
     /** Soroban RPC endpoints probed for quorum (majority must be healthy). */
     rpcHealthUrls: string[];
   };
+  /** Solver reputation scoring (issue #444). */
+  reputation: {
+    weights: {
+      fillRate: number;
+      latency: number;
+      slashes: number;
+      quoteHonour: number;
+      volume: number;
+    };
+    /** Exponential decay half-life in seconds. */
+    decayHalflifeSeconds: number;
+    /** Beta-distribution priors for the fill-rate Bayesian lower bound. */
+    bayesAlpha: number;
+    bayesBeta: number;
+    /** Volume-component knee in USD-equivalent notional (see RFC 0003). */
+    volumeLambdaUsd: number;
+    /** Trailing snapshot history exposed by /reputation (days, 1..365). */
+    historyWindowDays: number;
+  };
 }
 
 export default (): AppConfig => ({
@@ -463,7 +482,49 @@ export default (): AppConfig => ({
       .map((u) => u.trim())
       .filter(Boolean),
   },
+  reputation: (() => buildReputationConfig(process.env))(),
 });
+
+/**
+ * Parse and validate reputation weights + knobs.
+ *
+ * In dev/test, weights are renormalised on the fly so deployers can tweak a
+ * single weight and get a working system. In production, env.validation.ts
+ * already fails the boot when the sum is off by more than 1e-9, so the
+ * renormalisation branch below is effectively a no-op.
+ */
+function buildReputationConfig(env: NodeJS.ProcessEnv): AppConfig["reputation"] {
+  const fillRate = Number(env.REP_WEIGHT_FILL_RATE ?? 0.35);
+  const latency = Number(env.REP_WEIGHT_LATENCY ?? 0.15);
+  const slashes = Number(env.REP_WEIGHT_SLASHES ?? 0.25);
+  const quoteHonour = Number(env.REP_WEIGHT_QUOTE_HONOUR ?? 0.15);
+  const volume = Number(env.REP_WEIGHT_VOLUME ?? 0.10);
+  const sum = fillRate + latency + slashes + quoteHonour + volume;
+  let w = { fillRate, latency, slashes, quoteHonour, volume };
+  if (sum > 0 && Math.abs(sum - 1) > 1e-9) {
+    w = {
+      fillRate: fillRate / sum,
+      latency: latency / sum,
+      slashes: slashes / sum,
+      quoteHonour: quoteHonour / sum,
+      volume: volume / sum,
+    };
+  }
+  return {
+    weights: w,
+    decayHalflifeSeconds:
+      clampPositiveInt(env.REP_DECAY_HALFLIFE_SECONDS, 30 * 24 * 60 * 60),
+    bayesAlpha: Math.max(0.5, Number(env.REP_BAYES_ALPHA ?? 4)),
+    bayesBeta: Math.max(0.5, Number(env.REP_BAYES_BETA ?? 1)),
+    volumeLambdaUsd: Math.max(1, Number(env.REP_VOLUME_LAMBDA_USD ?? 100000)),
+    historyWindowDays: (() => {
+      const raw = parseInt(env.REP_HISTORY_WINDOW_DAYS ?? "30", 10);
+      if (!Number.isFinite(raw) || raw < 1) return 30;
+      if (raw > 365) return 365;
+      return raw;
+    })(),
+  };
+}
 
 /** Parse `SHADOW_SAMPLE_RATE` into a probability, defaulting to full sampling. */
 function clampSampleRate(raw: string | undefined): number {

@@ -118,8 +118,6 @@ model Intent {
   fillAmount     String?     @map("fill_amount")
   /// Realized protocol fee charged on this fill (destination-token base units).
   feeAmount      String?     @map("fee_amount")
-  /// On-chain transaction hash of the Stellar fill transaction.
-  txHash         String?     @map("tx_hash")
   /// USD value of `srcAmount` at creation time, computed from the resolved
   /// source-token price.  Stored as a numeric so range filters
   /// (`minAmountUsd` / `maxAmountUsd`) and USD sorting are indexable.

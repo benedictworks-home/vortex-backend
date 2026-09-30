@@ -20,7 +20,6 @@ import { Backplane, SequencedEvent, WS_BACKPLANE } from "./backplane/backplane.t
 import { MemoryBackplane } from "./backplane/memory.backplane";
 import { ConnectionState, resolveClientIp, EncodingFormat } from "./ws/connection-state";
 import { EncodingCache } from "./ws/encoding-cache";
-import { ConnectionState, resolveClientIp } from "./ws/connection-state";
 import { IntentFeedService } from "./feed/intent-feed.service";
 import { FeedClient, FeedFilter } from "./feed/feed.types";
 import { randomUUID } from "node:crypto";

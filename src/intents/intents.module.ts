@@ -43,7 +43,6 @@ import { FillVerifierService } from "../soroban/fill-verifier.service";
     GovernanceModule,
   ],
   controllers: [IntentsController, IntentsSseController],
-  controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
     // INTENTS_PERSISTENCE=prisma  → PrismaIntentsRepository (production/staging)

@@ -390,6 +390,7 @@ export const envValidationSchema = Joi.object({
   WS_OUTBOUND_QUEUE_MAX: Joi.number().integer().min(1).default(1000),
   WS_OUTBOUND_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
   WS_SLOW_CONSUMER_POLICY: Joi.string().valid("drop_oldest", "disconnect").default("drop_oldest"),
+  WS_DRAIN_TIMEOUT_MS: Joi.number().integer().min(1000).default(25000),
   // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
   // JWT auth; signature auth keeps working.
   AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
@@ -425,4 +426,49 @@ export const envValidationSchema = Joi.object({
   // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
   // Defaults to SOROBAN_RPC_URL.
   SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
+
+  // ── Solver reputation (issue #444) ────────────────────────────────────────
+  // Weights for each reputation sub-component. Must sum to 1 in production
+  // (fail closed if misconfigured); in dev/test the app renormalises and
+  // logs a warning so local experimentation doesn't prevent boot.
+  REP_WEIGHT_FILL_RATE: Joi.number().min(0).max(1).default(0.35),
+  REP_WEIGHT_LATENCY: Joi.number().min(0).max(1).default(0.15),
+  REP_WEIGHT_SLASHES: Joi.number().min(0).max(1).default(0.25),
+  REP_WEIGHT_QUOTE_HONOUR: Joi.number().min(0).max(1).default(0.15),
+  REP_WEIGHT_VOLUME: Joi.number().min(0).max(1).default(0.10),
+  // Shared exponential-decay half-life for all event weights.
+  // Defaults to 30 days so scores are dominated by the last ~1 month.
+  REP_DECAY_HALFLIFE_SECONDS: Joi.number()
+    .integer()
+    .min(86400)
+    .default(30 * 24 * 60 * 60),
+  // Beta-distribution priors for the fill-rate Bayesian cold-start prior.
+  // (α=4, β=1) gives a ~80% prior mean so new solvers rank above poor
+  // established performers rather than at the very bottom.
+  REP_BAYES_ALPHA: Joi.number().min(0.5).default(4),
+  REP_BAYES_BETA: Joi.number().min(0.5).default(1),
+  // Volume-component knee scale, in USD-equivalent notional.
+  // $100k default: moving from $10k → $100k of decayed volume accounts
+  // for ~0.5 of the normalised volume score.
+  REP_VOLUME_LAMBDA_USD: Joi.number().min(1).default(100000),
+  // How many trailing days of daily snapshots the /reputation endpoint
+  // returns. 1..365; default 30.
+  REP_HISTORY_WINDOW_DAYS: Joi.number().integer().min(1).max(365).default(30),
+}).custom((value, helpers) => {
+  const wSum =
+    (value.REP_WEIGHT_FILL_RATE ?? 0) +
+    (value.REP_WEIGHT_LATENCY ?? 0) +
+    (value.REP_WEIGHT_SLASHES ?? 0) +
+    (value.REP_WEIGHT_QUOTE_HONOUR ?? 0) +
+    (value.REP_WEIGHT_VOLUME ?? 0);
+  // Require exact-within-tolerance only in production. Dev/test accept any
+  // weights and let configuration.ts renormalise them.
+  if (value.NODE_ENV === "production" && Math.abs(wSum - 1) > 1e-9) {
+    return helpers.message({
+      custom:
+        `Reputation weights must sum to 1.0 in production, got ${wSum.toFixed(6)} ` +
+        "from REP_WEIGHT_{FILL_RATE,LATENCY,SLASHES,QUOTE_HONOUR,VOLUME}.",
+    });
+  }
+  return value;
 });

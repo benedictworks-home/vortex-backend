@@ -31,9 +31,6 @@ function canonicalPayload(payload: Record<string, string | number | null>): stri
 function buildV2IntentMessage(
   context: IntentSignatureContext,
   action: "accept" | "fill" | "cancel",
-  /**
-   * Build the canonical message that a solver must sign to update their mutable
-   * profile fields (name / supportedChains / supportedTokens / avgFillTime).
   intentId: string,
   payload: Record<string, string | number | null>,
 ): string {

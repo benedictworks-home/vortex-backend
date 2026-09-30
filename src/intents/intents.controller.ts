@@ -33,6 +33,8 @@ import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
 import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
+import { ReputationService, computeReputation } from "../solvers/reputation.service";
+import { SlashRecord } from "../solvers/solvers.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
 import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
@@ -103,9 +105,10 @@ export class IntentsController {
     private readonly abuseScorer: AbuseScoreService,
     private readonly signatureNonces: SignatureNonceService,
     private readonly evmSignatures: EvmSignatureVerifier,
+    private readonly reputationService: ReputationService,
+    private readonly fillVerifier: FillVerifierService,
     config: ConfigService<AppConfig, true>,
     @Optional() @Inject(MetricsService) private readonly metrics?: MetricsService,
-    private readonly fillVerifier: FillVerifierService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
     this.signatureNetwork = config.get("stellar.network", { infer: true });
@@ -751,7 +754,6 @@ export class IntentsController {
     }
 
     await this.consumeIntentNonce(signatureProof);
-    const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
     const feeAmount = (fillAmount * 5n) / 10000n;
 
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
@@ -875,6 +877,28 @@ export class IntentsController {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const srcPriceUSD: number = (srcToken as any)?.priceUSD ?? dstPriceUSD;
 
+    const now = Math.floor(Date.now() / 1000);
+    const allIntents = (await this.intentsService.getAll()) as Array<Intent & {
+      acceptedAt?: number;
+      deadlineAt?: number;
+      amountInUsd?: number;
+      fillAmount?: string;
+      slashedAt?: number;
+      state: string;
+    }>;
+    const repCfg = this.reputationService.getConfig();
+    const slashMap = new Map<string, SlashRecord[]>();
+    for (const s of solvers) {
+      const res = await this.solversService.getSlashHistory(s.address, 1, 10_000);
+      slashMap.set(s.address, res?.records ?? []);
+    }
+    const repScores = new Map<string, number>();
+    for (const s of solvers) {
+      const slashes = slashMap.get(s.address) ?? [];
+      const inputs = this.reputationService.buildInputs(s.address, allIntents, slashes, now);
+      repScores.set(s.address, computeReputation(inputs, repCfg).score);
+    }
+
     const quotes = solvers
       .map((solver) => {
         // Issue #118: weight variance by solver performance history.
@@ -937,7 +961,13 @@ export class IntentsController {
         };
       })
       // nosemgrep: no-number-money -- sort comparator on bounded quote diffs only; amounts stay strings elsewhere.
-      .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
+      .sort((a, b) => {
+        const amtDiff = Number(BigInt(b.dstAmount) - BigInt(a.dstAmount));
+        if (amtDiff !== 0) return amtDiff;
+        const repA = repScores.get(a.solver) ?? 0;
+        const repB = repScores.get(b.solver) ?? 0;
+        return repB - repA;
+      });
 
     if (dto.intentId && quotes.length > 0) {
       await this.intentsService.update(dto.intentId, { quotedDstAmount: quotes[0].dstAmount });
@@ -991,6 +1021,28 @@ export class IntentsController {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const srcPriceUSD: number = (srcToken as any)?.priceUSD ?? dstPriceUSD;
 
+    const now = Math.floor(Date.now() / 1000);
+    const allIntents = (await this.intentsService.getAll()) as Array<Intent & {
+      acceptedAt?: number;
+      deadlineAt?: number;
+      amountInUsd?: number;
+      fillAmount?: string;
+      slashedAt?: number;
+      state: string;
+    }>;
+    const repCfg = this.reputationService.getConfig();
+    const slashMapRq = new Map<string, SlashRecord[]>();
+    for (const s of solvers) {
+      const res = await this.solversService.getSlashHistory(s.address, 1, 10_000);
+      slashMapRq.set(s.address, res?.records ?? []);
+    }
+    const repScoresRq = new Map<string, number>();
+    for (const s of solvers) {
+      const slashes = slashMapRq.get(s.address) ?? [];
+      const inputs = this.reputationService.buildInputs(s.address, allIntents, slashes, now);
+      repScoresRq.set(s.address, computeReputation(inputs, repCfg).score);
+    }
+
     const quotes = solvers
       .map((solver) => {
         const totalFills = solver.fillsCompleted + solver.fillsFailed;
@@ -1040,7 +1092,13 @@ export class IntentsController {
         };
       })
       // nosemgrep: no-number-money -- sort comparator on bounded quote diffs only; amounts stay strings elsewhere.
-      .sort((a, b) => Number(BigInt(b.dstAmount) - BigInt(a.dstAmount)));
+      .sort((a, b) => {
+        const amtDiff = Number(BigInt(b.dstAmount) - BigInt(a.dstAmount));
+        if (amtDiff !== 0) return amtDiff;
+        const repA = repScoresRq.get(a.solver) ?? 0;
+        const repB = repScoresRq.get(b.solver) ?? 0;
+        return repB - repA;
+      });
 
     if (quotes.length > 0) {
       await this.intentsService.update(id, { quotedDstAmount: quotes[0].dstAmount });
