@@ -19,8 +19,9 @@
 8. [Scenario E — Synthetic canary failing](#scenario-e--synthetic-canary-failing)
 9. [Health probes](#health-probes)
 10. [Scenario F — WebSocket backplane and slow consumers](#scenario-f--websocket-backplane-and-slow-consumers)
-11. [Key configuration](#key-configuration)
-12. [Escalation path](#escalation-path)
+11. [Scenario G — Solvers mass-going offline](#scenario-g--solvers-mass-going-offline-issue-445)
+12. [Key configuration](#key-configuration)
+13. [Escalation path](#escalation-path)
 
 ---
 
@@ -48,6 +49,8 @@ read endpoints but does **not** take down the intent relay or WebSocket feed.
 | `vortex_sweeper_sweep_duration_ms` p99 | < 50 ms under normal load |
 | `vortex_sweeper_expired_total` | Monotonically increasing; spikes expected near intent `deadline` clusters |
 | WS subscriber count | Stable or slowly growing; sudden drops indicate client-side churn |
+| `vortex_solver_live_by_chain{chain=...}` | Matches the connected, beating solvers per chain; a sudden drop to 0 = heartbeat problem (Scenario G) |
+| `vortex_solver_status_changes_total{status="offline"}` | Flat between deploys; a spike means mass offline detection fired (Scenario G) |
 | Node.js heap | Steady-state < 200 MB; no sustained upward trend between GC cycles |
 
 ---
@@ -515,6 +518,39 @@ handlers never wait for Redis.
 
 ---
 
+## Scenario G — Solvers mass-going offline (issue #445)
+
+**Symptoms:** `vortex_solver_live_by_chain` drops toward 0 while the bots
+look healthy; `vortex_solver_status_changes_total{status="offline"}` spikes;
+`POST /api/v1/intents/quote` returns few or no solvers; log lines
+`liveness sweep aborted: shared store unreachable (partition guard, no
+transitions applied)`.
+
+1. **Check the shared liveness store.**
+   `redis-cli -u "$SOLVER_HEARTBEAT_REDIS_URL" ping` (falls back to
+   `REDIS_URL`; when both are empty each replica only sees its own
+   heartbeats — with more than one replica that is a misconfiguration).
+   Sweep aborts mean the partition guard is holding: no transitions are
+   applied while Redis is unreachable, so a Redis outage alone should not
+   mass-flip solvers. Mass flips with a healthy Redis point at the clients
+   themselves not beating (bad bot deploy, or a cadence slower than
+   `SOLVER_HEARTBEAT_INTERVAL_MS × SOLVER_HEARTBEAT_MISSES`).
+2. **Check the cadence.** Bots must send `{ "type": "heartbeat" }` (or a
+   signed `POST /api/v1/solvers/:addr/heartbeat`) at the interval returned
+   in `auth_ok.heartbeatIntervalMs` — default 10 000 ms, offline after
+   3 misses (30 s). Verify the bot actually received `heartbeat_ack`
+   `accepted: true` — an unauthenticated connection is rejected and never
+   refreshes liveness.
+3. **Check clocks.** The local view uses each replica's `Date.now()`, the
+   shared view uses Redis TTLs; a large NTP step can shift detection by one
+   cycle (10 s) but not cause a permanent outage.
+4. **Recovery is automatic.** The next heartbeat — or a fresh
+   authentication — re-activates an auto-offlined solver and emits
+   `solver_status_changed{status="online"}`. Records deactivated with
+   `deactivate`/`deregister` intentionally stay offline until `reactivate`.
+
+---
+
 ## Key configuration
 
 | Variable | Default | Effect |
@@ -532,6 +568,9 @@ handlers never wait for Redis.
 | `ADMIN_API_KEYS` | empty (admin APIs disabled) | `id:role:secret` entries for admin / superadmin endpoints |
 | `PROCESS_ROLE` / `JOBS_DRIVER` | `all` / `memory` | Where job workers run; `bullmq` for multi-instance |
 | `CANARY_ADDRESSES` | empty | Canary accounts excluded from public stats |
+| `SOLVER_HEARTBEAT_INTERVAL_MS` | `10000` | Cadence clients are told to beat at; also the sweep period |
+| `SOLVER_HEARTBEAT_MISSES` | `3` | Misses tolerated before auto-offline (window = interval × misses) |
+| `SOLVER_HEARTBEAT_REDIS_URL` | `REDIS_URL` when set | Shared liveness store; empty = process-local (single replica) |
 
 ---
 

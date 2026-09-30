@@ -23,6 +23,7 @@ import { SUPPORTED_CHAINS, SupportedChain } from "../intents/intents.types";
 import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import {
   buildDisputeMessage,
+  buildHeartbeatMessage,
   buildRegisterMessage,
   buildSolverStatusMessage,
   buildUpdateSolverMessage,
@@ -31,9 +32,11 @@ import {
 import { isCanaryIntent } from "../common/canary";
 import { AppConfig } from "../config/configuration";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
+import { SolverLivenessService } from "./solver-liveness.service";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { HeartbeatDto } from "./dto/heartbeat.dto";
 import { SolverCredentialService } from "../auth/solver-credentials/solver-credential.service";
 
 const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
@@ -50,6 +53,7 @@ export class SolversController {
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
     private readonly credentialService: SolverCredentialService,
+    private readonly liveness: SolverLivenessService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -316,6 +320,9 @@ export class SolversController {
 
     const solver = await this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #445 — a deliberate deregistration must never be undone by a
+    // later heartbeat (clear the auto-offline flag that allows re-activation).
+    await this.liveness.clearAutoOffline(address);
     // Issue #443 — instantly disable every credential of the deregistered solver.
     await this.credentialService.disableAllForSolver(address);
     return {
@@ -331,6 +338,9 @@ export class SolversController {
 
     const solver = await this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #445 — a deliberate deactivation must never be undone by a
+    // later heartbeat (clear the auto-offline flag that allows re-activation).
+    await this.liveness.clearAutoOffline(address);
     // Issue #443 — instantly disable every credential of the deactivated solver.
     await this.credentialService.disableAllForSolver(address);
     return solver;
@@ -342,6 +352,36 @@ export class SolversController {
     const solver = await this.solversService.reactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
+  }
+
+  /**
+   * POST /api/v1/solvers/:address/heartbeat — issue #445.
+   *
+   * REST liveness beat for clients without a persistent WS connection (the
+   * WS `{ "type": "heartbeat" }` message is the primary channel). The
+   * signature covers a timestamp and must be fresh within
+   * `max(60 s, offline window)` so a captured beat cannot keep a dead
+   * solver alive. The ack carries the negotiated cadence.
+   */
+  @Post(":address/heartbeat")
+  @ApiOperation({
+    summary: "Report solver liveness (heartbeat)",
+    description:
+      "Refreshes the solver's liveness window. Beat every heartbeatIntervalMs " +
+      "(returned in the ack, default 10 s); the backend marks the solver offline " +
+      "after interval × misses without a beat (default 30 s), excluding it from " +
+      "quotes and capability-filtered feeds until it beats again.",
+  })
+  async heartbeat(@Param("address") address: string, @Body() dto: HeartbeatDto) {
+    const now = Math.floor(Date.now() / 1000);
+    const maxSkewSeconds = Math.max(60, Math.ceil(this.liveness.offlineWindowMs / 1000));
+    if (Math.abs(now - dto.timestamp) > maxSkewSeconds) {
+      throw new BadRequestException("heartbeat timestamp outside the allowed freshness window");
+    }
+    verifyStellarSignature(address, buildHeartbeatMessage(address, dto.timestamp), dto.signature);
+    const ack = await this.liveness.touch(address);
+    if (!ack) throw new NotFoundException("Solver not found");
+    return ack;
   }
 
   /**

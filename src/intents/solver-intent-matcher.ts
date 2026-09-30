@@ -38,8 +38,14 @@ export interface SolverMatchPredicate {
 /**
  * Builds a match predicate for a solver.  The predicate is a plain closure so
  * it is cheap to evaluate (no object allocations per intent check).
+ *
+ * @param solver Record whose capabilities are compiled into the predicate.
+ * @param isLive Optional liveness gate (issue #445): evaluated on every
+ * `matches` call, so solvers that missed their heartbeats are excluded from
+ * capability filtering immediately — without rebuilding predicates that are
+ * already installed on live connections.
  */
-export function buildMatchPredicate(solver: SolverRecord): SolverMatchPredicate {
+export function buildMatchPredicate(solver: SolverRecord, isLive?: () => boolean): SolverMatchPredicate {
   // A missing capability list means the solver declared nothing, so it matches
   // nothing.  Defaulting to an empty set (rather than trusting the field to be
   // present) keeps a partially-populated solver record from widening its own
@@ -63,6 +69,7 @@ export function buildMatchPredicate(solver: SolverRecord): SolverMatchPredicate 
     supportedTokens: [...supportedTokens],
     bondAmount: solver.bondAmount,
     matches(intent: Intent): boolean {
+      if (isLive && !isLive()) return false;
       if (!hasBond) return false;
       if (!chainSet.has(intent.srcChain)) return false;
       const symbol =

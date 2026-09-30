@@ -465,6 +465,16 @@ export const envValidationSchema = Joi.object({
   // Cross-replica transport for credential revocation invalidation.
   CREDENTIAL_REVOCATION_PUBSUB: Joi.string().valid("memory", "redis").default("memory"),
 
+  // ── Solver liveness heartbeats (issue #445) ────────────────────────────────
+  // Cadence clients heartbeat at (ms) and misses tolerated before a solver
+  // is auto-marked offline (window = interval × misses).
+  SOLVER_HEARTBEAT_INTERVAL_MS: Joi.number().integer().min(1000).max(600000).default(10000),
+  SOLVER_HEARTBEAT_MISSES: Joi.number().integer().min(1).max(60).default(3),
+  // Shared liveness store URL. Defaults to REDIS_URL; leave both empty for a
+  // process-local store (single replica only — multi-replica deployments
+  // must share, otherwise each replica sees only its own heartbeats).
+  SOLVER_HEARTBEAT_REDIS_URL: Joi.string().allow("").optional(),
+
   // ── SSE intent feed (issue #433) ───────────────────────────────────────────
   // Heartbeat comment interval and per-client backpressure limit for the
   // Server-Sent Events intent stream.

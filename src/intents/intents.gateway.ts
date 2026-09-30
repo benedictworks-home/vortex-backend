@@ -5,6 +5,7 @@ import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 import { SolversService } from "../solvers/solvers.service";
+import { SolverLivenessService } from "../solvers/solver-liveness.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { logger } from "../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain } from "./intents.types";
@@ -90,6 +91,8 @@ export class IntentsGateway
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() config?: ConfigService<AppConfig, true>,
     @Optional() @Inject(WS_BACKPLANE) backplane?: Backplane,
+    /** Solver liveness heartbeats (issue #445) — optional for older harnesses. */
+    @Optional() private readonly liveness?: SolverLivenessService,
   ) {
     const defaults = configuration();
     this.wsConfig = config?.get("ws", { infer: true }) ?? defaults.ws;
@@ -312,6 +315,9 @@ export class IntentsGateway
         message: "Vortex intent stream",
         seq: currentSeq,
         encoding,
+        // Negotiated solver heartbeat cadence (issue #445); dropped from the
+        // payload when the liveness service is not wired.
+        heartbeatIntervalMs: this.liveness?.heartbeatIntervalMs,
       }),
     );
 
@@ -454,6 +460,9 @@ export class IntentsGateway
         break;
       case "auth":
         await this.handleAuth(client, msg);
+        break;
+      case "heartbeat":
+        this.handleHeartbeat(client);
         break;
       default:
         break;
@@ -623,6 +632,58 @@ export class IntentsGateway
   }
 
   /**
+   * Handles `{ "type": "heartbeat" }` from an authenticated solver
+   * (issue #445): refreshes liveness and acknowledges with the negotiated
+   * cadence. Unauthenticated connections get an explicit rejection so a bot
+   * notices it never completed auth.
+   */
+  private handleHeartbeat(client: WebSocket): void {
+    const address = this.authenticatedSolver.get(client);
+    if (!address) {
+      this.send(client, JSON.stringify({ type: "heartbeat_ack", accepted: false, reason: "not authenticated" }));
+      return;
+    }
+    void this.liveness?.touch(address).catch((err: unknown) =>
+      logger.warn(`liveness touch failed for ${address}: ${err instanceof Error ? err.message : String(err)}`),
+    );
+    this.send(
+      client,
+      JSON.stringify({
+        type: "heartbeat_ack",
+        accepted: true,
+        heartbeatIntervalMs: this.liveness?.heartbeatIntervalMs,
+      }),
+    );
+  }
+
+  /**
+   * Resolves a solver record for authentication (issue #445).
+   *
+   * Authenticating always touches the solver's liveness window. When the
+   * record was taken offline by missed heartbeats (the auto-offline flag is
+   * set) the touch heals it back to online — a successful signature is
+   * proof the process is running again — while a deliberately deactivated
+   * or deregistered record (no flag) stays rejected.
+   *
+   * @returns the active record, or `null` when the solver is unknown or
+   * deliberately inactive.
+   */
+  private async solverForAuth(
+    solver: string,
+  ): Promise<NonNullable<Awaited<ReturnType<SolversService["get"]>>> | null> {
+    let record = await this.solversService.get(solver);
+    if (!record) return null;
+    await this.liveness?.touch(solver).catch((err: unknown) =>
+      logger.warn(`liveness touch failed for ${solver}: ${err instanceof Error ? err.message : String(err)}`),
+    );
+    if (!record.isActive) {
+      // touch() re-activates auto-offlined records; re-read to observe it.
+      record = (await this.solversService.get(solver)) ?? record;
+    }
+    return record.isActive ? record : null;
+  }
+
+  /**
    * Authenticate a solver connection and install a capability predicate.
    */
   private async handleAuth(client: WebSocket, payload: Record<string, unknown>) {
@@ -646,8 +707,8 @@ export class IntentsGateway
       return;
     }
 
-    const solverRecord = await this.solversService.get(solver);
-    if (!solverRecord || !solverRecord.isActive) {
+    const solverRecord = await this.solverForAuth(solver);
+    if (!solverRecord) {
       this.send(client, JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
       return;
     }
@@ -671,8 +732,8 @@ export class IntentsGateway
       this.send(client, JSON.stringify({ type: "auth_error", reason: "invalid or expired token" }));
       return;
     }
-    const solverRecord = await this.solversService.get(claims.sub);
-    if (!solverRecord || !solverRecord.isActive) {
+    const solverRecord = await this.solverForAuth(claims.sub);
+    if (!solverRecord) {
       this.send(client, JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
       return;
     }
@@ -686,7 +747,8 @@ export class IntentsGateway
     method: "signature" | "jwt",
   ): Promise<void> {
     const solver = solverRecord.address;
-    const predicate = buildMatchPredicate(solverRecord);
+    const liveness = this.liveness;
+    const predicate = buildMatchPredicate(solverRecord, liveness ? () => liveness.isLive(solver) : undefined);
     this.authenticatedSolver.set(client, solver);
     const authFilter = this.subscribers.get(client);
     this.subscribers.set(client, {
@@ -705,7 +767,16 @@ export class IntentsGateway
       }
     }
 
-    this.send(client, JSON.stringify({ type: "auth_ok", method }));
+    this.send(
+      client,
+      JSON.stringify({
+        type: "auth_ok",
+        method,
+        // Negotiated heartbeat cadence (issue #445); undefined values are
+        // dropped by JSON.stringify when liveness is not wired.
+        heartbeatIntervalMs: this.liveness?.heartbeatIntervalMs,
+      }),
+    );
 
     try {
       const eligible = this.intentIndex.getEligibleFor(solverRecord);
@@ -734,7 +805,11 @@ export class IntentsGateway
     const solverRecord = await this.solversService.get(solverAddress);
     if (!solverRecord) return;
 
-    const predicate = buildMatchPredicate(solverRecord);
+    const liveness = this.liveness;
+    const predicate = buildMatchPredicate(
+      solverRecord,
+      liveness ? () => liveness.isLive(solverAddress) : undefined,
+    );
     for (const [client, filter] of this.subscribers) {
       if (this.authenticatedSolver.get(client) === solverAddress && filter.solver !== null) {
         this.subscribers.set(client, { ...filter, solver: predicate });

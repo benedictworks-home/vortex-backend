@@ -164,7 +164,10 @@ export class SolversService {
     }
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
-    const updated = { ...solver, isActive: true };
+    // Issue #445 — status transitions refresh lastActiveAt so the liveness
+    // grace treats a reactivation as proof of life (bot gets one offline
+    // window to reconnect and start heartbeating).
+    const updated = { ...solver, isActive: true, lastActiveAt: Math.floor(Date.now() / 1000) };
     return this.repo.save(updated);
   }
 

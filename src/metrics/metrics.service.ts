@@ -103,6 +103,10 @@ export class MetricsService implements OnModuleInit {
   public readonly solverRegistryEventsTotal: client.Counter<string>;
   public readonly legacyStellarSignatures: client.Counter<string>;
 
+  // ── Solver liveness heartbeats (issue #445) ───────────────────────────────
+  public readonly solverLiveByChain: client.Gauge<string>;
+  public readonly solverStatusChangesTotal: client.Counter<string>;
+
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
     const prefix = "vortex_";
@@ -236,6 +240,21 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}legacy_stellar_signatures_total`,
       help: "Accepted version 1 Stellar intent signatures during the deprecation window",
       labelNames: ["action"],
+      registers: [this.register],
+    });
+
+    // ── Solver liveness heartbeats (issue #445) ──────────────────────────
+    this.solverLiveByChain = new client.Gauge({
+      name: `${prefix}solver_live_by_chain`,
+      help: "Active solvers considered live (heartbeat within the offline window), by supported chain",
+      labelNames: ["chain"],
+      registers: [this.register],
+    });
+
+    this.solverStatusChangesTotal = new client.Counter({
+      name: `${prefix}solver_status_changes_total`,
+      help: "Solver online/offline status transitions emitted by the liveness system",
+      labelNames: ["status"],
       registers: [this.register],
     });
 

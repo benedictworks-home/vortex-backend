@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { randomUUID } from "node:crypto";
 import { IntentsService } from "../intents.service";
 import { SolversService } from "../../solvers/solvers.service";
+import { SolverLivenessService } from "../../solvers/solver-liveness.service";
 import { MetricsService } from "../../metrics/metrics.service";
 import { logger } from "../../common/logger";
 import { SUPPORTED_CHAINS, SupportedChain, IntentState } from "../intents.types";
@@ -59,6 +60,8 @@ export class IntentFeedService implements OnModuleDestroy {
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() config?: ConfigService<AppConfig, true>,
     @Optional() @Inject(WS_BACKPLANE) backplane?: Backplane,
+    /** Solver liveness heartbeats (issue #445) — optional for older harnesses. */
+    @Optional() private readonly liveness?: SolverLivenessService,
   ) {
     const defaults = configuration();
     this.wsConfig = config?.get("ws", { infer: true }) ?? defaults.ws;
@@ -296,7 +299,11 @@ export class IntentFeedService implements OnModuleDestroy {
     const solverRecord = await this.solversService.get(solverAddress);
     if (!solverRecord) return;
 
-    const predicate = buildMatchPredicate(solverRecord);
+    const liveness = this.liveness;
+    const predicate = buildMatchPredicate(
+      solverRecord,
+      liveness ? () => liveness.isLive(solverAddress) : undefined,
+    );
     for (const [client, filter] of this.clients) {
       if (filter.solver !== null && filter.solver.solverAddress === solverAddress) {
         this.clients.set(client, { ...filter, solver: predicate });

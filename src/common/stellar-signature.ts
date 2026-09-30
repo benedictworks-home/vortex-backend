@@ -81,6 +81,16 @@ export function buildWsAuthMessage(solver: string, timestamp: number | string): 
 }
 
 /**
+ * Build the canonical message that a solver must sign to report liveness
+ * over REST (issue #445). The timestamp keeps the proof fresh: a heartbeat
+ * older than the offline window is rejected, so a captured signature cannot
+ * be replayed to keep a dead solver "live".
+ */
+export function buildHeartbeatMessage(address: string, timestamp: number | string): string {
+  return `heartbeat:${address}:${String(timestamp)}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to accept an intent.
  */
 export function buildAcceptMessage(intentId: string, solver: string, context?: IntentSignatureContext): string {

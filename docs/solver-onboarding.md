@@ -184,6 +184,68 @@ On connection or reconnection, the bot can request event replay from its last re
 }
 ```
 
+### Heartbeats & Liveness
+
+The backend tracks whether each solver process is actually running (issue
+#445). The negotiated cadence is advertised in the `connected` frame and in
+`auth_ok`:
+
+```json
+{ "type": "auth_ok", "method": "signature", "heartbeatIntervalMs": 10000 }
+```
+
+Send a heartbeat at that interval (default every 10 s):
+
+```json
+{ "type": "heartbeat" }
+```
+
+The server acknowledges with the cadence again:
+
+```json
+{ "type": "heartbeat_ack", "accepted": true, "heartbeatIntervalMs": 10000 }
+```
+
+Unauthenticated connections receive `accepted: false` — complete the `auth`
+step first. After `heartbeatIntervalMs × misses` without a beat (default
+10 000 × 3 = 30 s) the solver is marked **offline** and every connected
+subscriber receives:
+
+```json
+{
+  "type": "solver_status_changed",
+  "solver": "G...",
+  "status": "offline",
+  "lastActiveAt": 1759248000,
+  "reason": "missed_heartbeats",
+  "at": 1759248030
+}
+```
+
+While offline the solver is excluded from `POST /api/v1/intents/quote`
+results, stops receiving capability-filtered intent events, and is rejected
+on new WS authentications. The next heartbeat — or simply re-authenticating
+on a fresh connection — flips it back to `online` (the event is re-emitted
+with `reason: "heartbeat"`). Deliberate deactivations (`deactivate` /
+`deregister`) are **not** undone by heartbeats; they require `reactivate`.
+
+Clients without a persistent connection can beat over REST instead. The
+timestamp must be fresh (within `max(60 s, offline window)`), signed over
+the canonical message `heartbeat:<address>:<timestamp>`:
+
+```bash
+MSG="heartbeat:$SOLVER_ADDRESS:$TS"
+SIG=$(sign "$MSG")   # Ed25519 over the canonical message
+curl -X POST "$BACKEND_URL/api/v1/solvers/$SOLVER_ADDRESS/heartbeat" \
+  -H "Content-Type: application/json" \
+  -d "{\"timestamp\": $TS, \"signature\": \"$SIG\"}"
+# -> { "status": "online", "lastActiveAt": ..., "heartbeatIntervalMs": 10000 }
+```
+
+Multi-replica deployments must share liveness
+(`SOLVER_HEARTBEAT_REDIS_URL`, which defaults to `REDIS_URL`) — otherwise
+each replica only sees the heartbeats routed to it.
+
 ### Accepting & Filling Intents with Auth Signatures
 
 When a solver sees an open intent, it performs 2 steps:

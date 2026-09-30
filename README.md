@@ -35,6 +35,7 @@ POST /api/v1/intents/:id/cancel   — user cancels
 POST /api/v1/intents/quote        — get best quote from solvers
 GET  /api/v1/solvers              — solver leaderboard
 GET  /api/v1/solvers/:addr/stats  — solver performance stats
+POST /api/v1/solvers/:addr/heartbeat — solver liveness heartbeat (keeps the solver online)
 GET  /api/v1/tokens               — supported tokens (filter by chain)
 POST /api/v1/admin/tokens         — register a token (admin key, on-chain metadata check)
 PATCH /api/v1/admin/tokens        — update status or re-verified metadata

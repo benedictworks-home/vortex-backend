@@ -318,6 +318,14 @@ export interface AppConfig {
    * (issue #443): "memory" (single instance) or "redis" (pub/sub).
    */
   credentialRevocationPubsub: "memory" | "redis";
+  /**
+   * Solver liveness heartbeats (issue #445): cadence the server expects
+   * clients to beat at, misses tolerated before auto-offline, and the
+   * shared store URL ("" → process-local, single replica).
+   */
+  solverHeartbeatIntervalMs: number;
+  solverHeartbeatMisses: number;
+  solverHeartbeatRedisUrl: string;
   /** SSE intent feed (issue #433). */
   sse: {
     /** Heartbeat interval in milliseconds (SSE comment frames). */
@@ -488,6 +496,13 @@ export default (): AppConfig => ({
   // to "" to force the bounded local limiter (single-replica / test).
   rateLimitRedisUrl: process.env.RATE_LIMIT_REDIS_URL ?? process.env.REDIS_URL ?? "",
   credentialRevocationPubsub: (process.env.CREDENTIAL_REVOCATION_PUBSUB ?? "memory") as "memory" | "redis",
+  // Solver liveness heartbeats (#445): client cadence (ms), tolerated misses
+  // (offline after interval × misses), and the shared liveness store URL.
+  // Defaults to REDIS_URL so multi-replica deployments share liveness for
+  // free; "" (no REDIS_URL) falls back to the process-local memory store.
+  solverHeartbeatIntervalMs: parseInt(process.env.SOLVER_HEARTBEAT_INTERVAL_MS ?? "10000", 10),
+  solverHeartbeatMisses: parseInt(process.env.SOLVER_HEARTBEAT_MISSES ?? "3", 10),
+  solverHeartbeatRedisUrl: process.env.SOLVER_HEARTBEAT_REDIS_URL ?? process.env.REDIS_URL ?? "",
   sse: {
     heartbeatMs: parseInt(process.env.SSE_HEARTBEAT_MS ?? "15000", 10),
     maxBufferBytes: parseInt(process.env.SSE_MAX_BUFFER_BYTES ?? "1048576", 10),
