@@ -6,7 +6,6 @@ import { PrismaService } from "../prisma/prisma.service";
 import { ProtocolParamsService } from "../governance/params.service";
 import { ShadowService, type ShadowObservationRequest } from "../soroban/shadow.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
-import { ProtocolParamsService } from "../governance/params.service";
 import { IntentsService } from "./intents.service";
 import { InMemoryIntentsRepository } from "./intents.repository";
 import { MutationResult, VersionConflict } from "./intents.repository";

@@ -37,8 +37,12 @@ function makeSolverRecord(address: string, overrides: Partial<SolverRecord> = {}
   };
 }
 
-/** Stub capability index: the gateway only reads eligible intents from it. */
-function makeIntentIndex(): IntentCapabilityIndex {
+/**
+ * Capability index for tests: wraps the real index around `intentsService`,
+ * or returns a stub the gateway can read from when none is given.
+ */
+function makeIntentIndex(intentsService?: IntentsService): IntentCapabilityIndex {
+  if (intentsService) return new IntentCapabilityIndex(intentsService);
   return {
     rebuild: jest.fn().mockResolvedValue(undefined),
     addIntent: jest.fn(),
@@ -84,10 +88,6 @@ function makeSolversService() {
   return {
     get: jest.fn().mockResolvedValue(makeSolverRecord("GTEST")),
   } as any;
-}
-
-function makeIntentIndex(intentsService: IntentsService): IntentCapabilityIndex {
-  return new IntentCapabilityIndex(intentsService);
 }
 
 function makeFeed(

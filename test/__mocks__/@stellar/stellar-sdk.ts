@@ -92,7 +92,6 @@ export const Networks = real.Networks;
 export const StrKey = real.StrKey;
 export const Address = real.Address;
 export const Asset = real.Asset;
-export const Horizon = real.Horizon;
 export const Contract = real.Contract;
 export const Account = real.Account;
 export const Operation = real.Operation;

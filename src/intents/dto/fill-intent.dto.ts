@@ -1,7 +1,5 @@
 import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { IsString, Matches, MaxLength, MinLength } from "class-validator";
-import { ApiProperty } from "@nestjs/swagger";
 
 const ED25519_SIGNATURE_MAX_LENGTH = 88;
 
