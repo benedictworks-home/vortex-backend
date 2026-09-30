@@ -24,6 +24,7 @@
     "check:env-drift": "tsx scripts/check-env-drift.ts",
     "seed": "tsx scripts/seed.ts",
     "solver:demo": "tsx scripts/solver-bot.ts",
+    "simulate": "tsx tools/simulator/cli.ts",
     "canary": "tsx tools/canary/canary.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

@@ -48,6 +48,24 @@ module.exports = {
         ],
       },
     },
+
+    // ── Simulator tooling suite (issue #452) ───────────────────────────────
+    // The replay harness lives in tools/simulator/ (outside src/); same
+    // broader-rootDir trick as the scripts suite.
+    {
+      displayName: "tools",
+      testEnvironment: "node",
+      rootDir: ".",
+      testMatch: ["<rootDir>/tools/**/*.spec.ts"],
+      transform: {
+        "^.+\\.tsx?$": [
+          "ts-jest",
+          {
+            tsconfig: "./tsconfig.tools.json",
+          },
+        ],
+      },
+    },
   ],
 
   // Coverage is collected from the project-level collectCoverageFrom above.
