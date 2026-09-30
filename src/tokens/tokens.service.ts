@@ -1,6 +1,5 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
-import { SUPPORTED_TOKENS, STELLAR_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
 

@@ -278,6 +278,7 @@ export interface AppConfig {
     refreshIntervalMs: number;
     /** Comma-separated extra secrets: "name:envVar:required". */
     extra: string;
+  };
   /** WS gateway hardening (issue #455). */
   ws: {
     /** Largest inbound frame accepted; larger frames close the socket (1009). */
@@ -467,6 +468,7 @@ export default (): AppConfig => ({
     provider: (process.env.SECRETS_PROVIDER ?? "env") as "env" | "aws-secrets-manager" | "vault-kv",
     refreshIntervalMs: parseInt(process.env.SECRETS_REFRESH_INTERVAL_MS ?? "60000", 10),
     extra: process.env.SECRETS_EXTRA ?? "",
+  },
   ws: {
     maxPayloadBytes: parseInt(process.env.WS_MAX_PAYLOAD_BYTES ?? "16384", 10),
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP ?? "20", 10),

@@ -20,7 +20,6 @@ import { Backplane, SequencedEvent, WS_BACKPLANE } from "./backplane/backplane.t
 import { MemoryBackplane } from "./backplane/memory.backplane";
 import { ConnectionState, resolveClientIp, EncodingFormat } from "./ws/connection-state";
 import { EncodingCache } from "./ws/encoding-cache";
-import { ConnectionState, resolveClientIp } from "./ws/connection-state";
 import { IntentFeedService } from "./feed/intent-feed.service";
 import { FeedClient, FeedFilter } from "./feed/feed.types";
 import { randomUUID } from "node:crypto";
@@ -187,13 +186,6 @@ export class IntentsGateway
     }
   }
 
-  handleConnection(client: WebSocket) {
-    this.subscribers.set(client, {
-      chains: null,
-      solver: null,
-      wantAll: false,
-      subscriptionCount: 0,
-    });
   /**
    * Send an event to a client using its negotiated encoding format (Activity 1).
    * 
@@ -492,12 +484,6 @@ export class IntentsGateway
 
     // all=true: opt out of capability filtering.
     if (msg.all === true) {
-      const existing = this.subscribers.get(client) ?? {
-        chains: null,
-        solver: null,
-        wantAll: false,
-        subscriptionCount: 0,
-      };
       const existing = this.subscribers.get(client) ?? { chains: null, solver: null, wantAll: false, subscriptionCount: 0 };
       this.subscribers.set(client, { ...existing, wantAll: true });
       this.feed.updateClientFilter(feedClient, { ...current, wantAll: true });
@@ -916,20 +902,6 @@ export class IntentsGateway
         logger.debug(
           `ws heartbeat terminated dead client (subscribers=${this.feed.connectionCount})`,
         );
-        continue;
-      }
-
-      feedClient.alive = false;
-      if (client.readyState === WebSocket.OPEN) {
-        client.ping();
-      }
-    }
-    this.lastHeartbeatTerminatedCount = terminated;
-    if (terminated > 0) {
-      logger.debug(
-        `ws heartbeat terminated ${terminated} dead client(s) (subscribers=${this.subscribers.size})`,
-      );
-    }
         continue;
       }
 

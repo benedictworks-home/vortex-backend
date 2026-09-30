@@ -1,5 +1,4 @@
 import { forwardRef, Module } from "@nestjs/common";
-import { Module, forwardRef } from "@nestjs/common";
 import { ProtocolParamsService } from "./params.service";
 import { ParamsController } from "./params.controller";
 import { SorobanModule } from "../soroban/soroban.module";

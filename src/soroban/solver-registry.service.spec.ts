@@ -84,6 +84,7 @@ function makeConfigService(
       provider: "env",
       refreshIntervalMs: 60000,
       extra: "",
+    },
     ws: {
       maxPayloadBytes: 16384,
       maxConnectionsPerIp: 20,
