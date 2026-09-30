@@ -187,7 +187,7 @@ A sweep that has been delayed or killed will simply be absent.
 ### How the sweeper works
 
 `IntentsSweeperService.sweep()` is triggered by a `setInterval` every
-`SWEEP_INTERVAL_MS` (30 000 ms, hardcoded).  It:
+`SAFETY_SWEEP_INTERVAL_MS` (default 300 000 ms). Deadline jobs (`expire-intent`, `fill-window-expired`) are the primary path. The safety sweep:
 
 1. Calls `IntentsService.getByState("open")` — iterates the in-memory store.
 2. Compares each intent's `deadline` (Unix timestamp) against `Date.now()`.
@@ -523,7 +523,7 @@ handlers never wait for Redis.
 | `STELLAR_NETWORK` | `testnet` | Network passphrase selection |
 | `PORT` | `4000` | HTTP + WS listen port |
 | `NODE_ENV` | `development` | Log verbosity (set to `production` in prod) |
-| `SWEEP_INTERVAL_MS` | `30000` (hardcoded) | How often the sweeper runs; change requires code deploy |
+| `SAFETY_SWEEP_INTERVAL_MS` | `300000` | How often the safety sweep scans for deadline jobs the queue missed |
 | `KILLSWITCH_OPERATOR_TOKEN` | empty (control plane disabled) | Secret for `/api/v1/ops/killswitch`; **required in production** |
 | `KILLSWITCH_REDIS_URL` | `REDIS_URL` when `WS_BACKPLANE=redis` | Cross-replica pause propagation; empty = poll only |
 | `KILLSWITCH_POLL_MS` | `2000` | DB change-probe interval backing up Redis; caps propagation delay |

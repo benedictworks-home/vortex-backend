@@ -9,7 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
-import { INTENTS_REPOSITORY, IIntentsRepository, IntentSearchQuery, IntentSearchResult } from "./intents.repository";
+import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
 import {
   CHAIN_DEADLINE_DEFAULTS,
@@ -24,6 +24,7 @@ import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProtocolParamsService } from "../governance/params.service";
 import { FeatureFlagService } from "../flags/feature-flag.service";
+import { IntentDeadlineScheduler } from "./intents-deadline.jobs";
 
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
@@ -50,31 +51,6 @@ function isKnownShadowTransition(transition: ShadowTransition): boolean {
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
-
-/**
- * Compute the USD value of a base-unit amount at a given token price (issue #440).
- *
- * Uses integer arithmetic for the amount (BigInt) so large base-unit values do
- * not lose precision before the float conversion; the price is scaled to 1e8
- * to keep the multiplication in integer space.  Returns `undefined` when the
- * price is unknown — historical rows are never backfilled with fabricated
- * values.
- */
-function computeUsdValue(
-  srcAmount: string,
-  decimals: number,
-  priceUsd: number | undefined,
-): number | undefined {
-  if (priceUsd === undefined || priceUsd === null || !Number.isFinite(priceUsd)) return undefined;
-  try {
-    const amount = BigInt(srcAmount);
-    const scale = 10n ** BigInt(decimals);
-    const scaled = amount * BigInt(Math.round(priceUsd * 1e8));
-    return Number(scaled / (scale * 100_000_000n));
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * Maximum number of simultaneously open (state = "open" | "accepted") intents
@@ -155,6 +131,7 @@ export class IntentsService {
      */
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
+    @Optional() private readonly deadlines?: IntentDeadlineScheduler,
   ) {}
 
   /**
@@ -277,7 +254,6 @@ export class IntentsService {
       createdAt: now,
       deadline: defaultDeadline,
       paramsVersion: paramsSnapshot.version,
-      usdValueAtCreate: computeUsdValue(data.srcAmount, data.srcToken.decimals, data.srcToken.priceUSD),
     };
 
     // ONCHAIN_INTENTS_ENABLED is the default; the `onchain-intents-enabled`
@@ -293,6 +269,7 @@ export class IntentsService {
     }
 
     await this.repo.save(intent);
+    this.deadlines?.scheduleExpire(intent);
     // Creation is the entry edge of the funnel: the `vortex:intent:*` recording
     // rules count transitions *into* each state, so without this the intent
     // dashboard would start every conversion ratio from zero. `from_state` is
@@ -465,18 +442,6 @@ export class IntentsService {
   }
 
   /**
-   * Advanced search with filtering, sorting and pagination (issue #440).
-   *
-   * Delegates to the repository's `search` so the filtering/sorting/pagination
-   * is pushed into the storage adapter (SQL for Prisma, in-memory for the
-   * dev/test backend). When no filters are present the result is identical to
-   * `getAll()` paginated — the default sort is `createdAt` descending.
-   */
-  async search(query: IntentSearchQuery): Promise<IntentSearchResult> {
-    return this.repo.search(query);
-  }
-
-  /**
    * Batch-fetch the current record for each of `ids` (issue #275).
    *
    * IDs are de-duplicated; IDs with no matching record are simply omitted from
@@ -544,29 +509,47 @@ export class IntentsService {
    * unfairly slashed for a deadline that was never realistic.
    * Returns null when the intent is not found, not open, or past deadline.
    */
-  async acceptIfOpen(
-    id: string,
-    solver: string,
-    now?: number,
-    acceptedDstAmount?: string,
-  ): Promise<Intent | null> {
+  async acceptIfOpen(id: string, solver: string, now?: number): Promise<Intent | null> {
     const intent = await this.repo.findById(id);
     if (!intent) return null;
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const fillWindow =
       CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
-    const updated = await this.repo.acceptIfOpen(
-      id,
-      solver,
-      nowSec + fillWindow,
-      nowSec,
-      acceptedDstAmount,
-    );
-    if (updated !== null) this.countTransition("open", "accepted");
+    const updated = await this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec);
+    if (updated !== null) {
+      this.countTransition("open", "accepted");
+      this.deadlines?.scheduleFillWindow(updated);
+    }
     if (this.beginShadowObservation()) {
       this.observeAccept(updated ?? intent, solver, updated !== null);
     }
     return updated;
+  }
+
+  /** Accept only when this solver remains below the configured exposure cap. */
+  async acceptIfOpenWithinExposure(
+    id: string,
+    solver: string,
+    candidateExposureUsdMicros: bigint,
+    maxExposureUsdMicros: bigint,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> {
+    const intent = await this.repo.findById(id);
+    if (!intent) return { intent: null, exposureExceeded: false };
+    const fillWindow = this.protocolParamsService.snapshotForChain(intent.srcChain).fillWindowSeconds;
+    const result = await this.repo.acceptIfOpenWithinExposure(
+      id,
+      solver,
+      now + fillWindow,
+      now,
+      candidateExposureUsdMicros,
+      maxExposureUsdMicros,
+    );
+    if (result.intent !== null) this.countTransition("open", "accepted");
+    if (this.beginShadowObservation()) {
+      this.observeAccept(result.intent ?? intent, solver, result.intent !== null);
+    }
+    return result;
   }
 
   /** Shadow hook for `accept` — reported whether or not the conditional write won. */
@@ -608,11 +591,6 @@ export class IntentsService {
       this.observeFill(id, solver, patch.fillAmount, patch.txHash, updated !== null);
     }
     return updated;
-  }
-
-  /** Reserve a tx hash once, atomically, before external verification begins. */
-  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
-    return this.repo.reserveFillTxHash(id, solver, txHash);
   }
 
   /** Shadow hook for `fill` — reported whether or not the conditional write won. */
@@ -704,8 +682,8 @@ export class IntentsService {
       // An "accepted" intent always carries a solver. A record without one is
       // corrupt, so skip the simulation rather than encoding a null address —
       // the sweep loop already logs that case loudly.
-      const solver = subject?.solver;
-      if (solver && subject) {
+      if (subject?.solver) {
+        const solver = subject.solver;
         this.reportShadow(
           "slash",
           subject.intentId,
@@ -714,8 +692,8 @@ export class IntentsService {
           this.safeArgs(() => [
             nativeToScVal(subject.intentId, { type: "string" }),
             new Address(solver).toScVal(),
-            nativeToScVal(patch.slashReason, { type: "string" }),
-            nativeToScVal(patch.slashedAt, { type: "u64" }),
+            nativeToScVal(patch.slashReason ?? "", { type: "string" }),
+            nativeToScVal(patch.slashedAt ?? 0, { type: "u64" }),
           ]),
         );
       }
@@ -730,7 +708,9 @@ export class IntentsService {
    * or already has a later deadline.
    */
   async extendDeadlineIfAccepted(id: string, newDeadline: number): Promise<Intent | null> {
-    return this.repo.extendDeadlineIfAccepted(id, newDeadline);
+    const updated = await this.repo.extendDeadlineIfAccepted(id, newDeadline);
+    if (updated) this.deadlines?.scheduleFillWindow(updated);
+    return updated;
   }
 
   // ---------------------------------------------------------------------------
