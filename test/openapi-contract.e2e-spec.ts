@@ -40,6 +40,16 @@ describe("OpenAPI contract (e2e)", () => {
     expect(res.body.info.title).toBe("Vortex Backend");
   });
 
+  it("serves separate OpenAPI documents for v1 and v2", async () => {
+    const v1 = await request(app.getHttpServer()).get("/docs/v1-json").expect(200);
+    const v2 = await request(app.getHttpServer()).get("/docs/v2-json").expect(200);
+
+    expect(v1.body.paths["/api/v1/intents"]).toBeDefined();
+    expect(v1.body.paths["/health"]).toBeUndefined();
+    expect(v2.body.info.version).toBe("2");
+    expect(Object.keys(v2.body.paths)).toEqual([]);
+  });
+
   it("declares all intent endpoints", async () => {
     const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
     const paths: Record<string, unknown> = res.body.paths;

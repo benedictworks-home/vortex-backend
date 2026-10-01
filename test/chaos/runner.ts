@@ -36,6 +36,7 @@ const results: ScenarioResult[] = [];
 // ── Toxiproxy helpers ────────────────────────────────────────────────────────
 
 async function addToxic(proxy: string, toxic: ToxicConfig, name: string): Promise<void> {
+  // eslint-disable-next-line no-restricted-syntax -- standalone chaos runner targets a local Toxiproxy endpoint
   const res = await fetch(`${TOXIPROXY}/proxies/${proxy}/toxics`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -54,6 +55,7 @@ async function addToxic(proxy: string, toxic: ToxicConfig, name: string): Promis
 }
 
 async function removeToxic(proxy: string, name: string): Promise<void> {
+  // eslint-disable-next-line no-restricted-syntax -- standalone chaos runner targets a local Toxiproxy endpoint
   const res = await fetch(`${TOXIPROXY}/proxies/${proxy}/toxics/${name}`, {
     method: "DELETE",
   });
@@ -67,6 +69,7 @@ async function removeToxic(proxy: string, name: string): Promise<void> {
 /** Returns the HTTP status of GET /health/ready. */
 async function healthStatus(): Promise<number> {
   try {
+    // eslint-disable-next-line no-restricted-syntax -- standalone chaos runner targets its configured test service
     const res = await fetch(`${BASE_URL}/health/ready`, { signal: AbortSignal.timeout(5_000) });
     return res.status;
   } catch {
@@ -81,6 +84,7 @@ async function healthStatus(): Promise<number> {
  */
 async function createTestIntent(): Promise<number> {
   try {
+    // eslint-disable-next-line no-restricted-syntax -- standalone chaos runner targets its configured test service
     const res = await fetch(`${BASE_URL}/api/v1/intents`, {
       method: "POST",
       headers: {

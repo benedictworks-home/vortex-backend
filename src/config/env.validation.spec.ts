@@ -11,12 +11,15 @@ const VALID_KEY = "S" + "A".repeat(55);
  * ONCHAIN_DRY_RUN (#260), SOROBAN_SIGNING_KEY, and KILLSWITCH_OPERATOR_TOKEN
  * (#477). Each test below overrides only the one key it is about, so a failure
  * is attributable to that key rather than to whichever requirement fired first.
+ *
+ * METRICS_TOKEN (#298) is also required in production.
  */
 const PROD_ENV = {
   NODE_ENV: "production",
   ONCHAIN_DRY_RUN: true,
   SOROBAN_SIGNING_KEY: VALID_KEY,
   KILLSWITCH_OPERATOR_TOKEN: "operator-secret",
+  METRICS_TOKEN: "a-sufficiently-long-metrics-secret",
 };
 
 describe("envValidationSchema — SOROBAN_SIGNING_KEY", () => {
@@ -257,5 +260,66 @@ describe("envValidationSchema — kill-switch propagation (issue #477)", () => {
     });
     expect(error).toBeUndefined();
     expect(value.KILLSWITCH_REDIS_URL).toBe("");
+  });
+});
+
+describe("envValidationSchema — METRICS_TOKEN (issue #298)", () => {
+  it("defaults to an empty string outside production (endpoint disabled)", () => {
+    const { error, value } = envValidationSchema.validate(BASE_ENV);
+    expect(error).toBeUndefined();
+    expect(value.METRICS_TOKEN).toBe("");
+  });
+
+  it("accepts an explicit empty value outside production", () => {
+    const { error } = envValidationSchema.validate({
+      ...BASE_ENV,
+      METRICS_TOKEN: "",
+    });
+    expect(error).toBeUndefined();
+  });
+
+  it("accepts any non-empty token outside production", () => {
+    const { error, value } = envValidationSchema.validate({
+      ...BASE_ENV,
+      METRICS_TOKEN: "short",
+    });
+    expect(error).toBeUndefined();
+    expect(value.METRICS_TOKEN).toBe("short");
+  });
+
+  it("is required (non-empty) in production", () => {
+    const { error } = envValidationSchema.validate({
+      ...PROD_ENV,
+      METRICS_TOKEN: undefined,
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("METRICS_TOKEN");
+  });
+
+  it("rejects an empty string in production", () => {
+    const { error } = envValidationSchema.validate({
+      ...PROD_ENV,
+      METRICS_TOKEN: "",
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("METRICS_TOKEN");
+  });
+
+  it("rejects a token shorter than 16 chars in production", () => {
+    const { error } = envValidationSchema.validate({
+      ...PROD_ENV,
+      METRICS_TOKEN: "too-short",
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("METRICS_TOKEN");
+  });
+
+  it("accepts a token of at least 16 characters in production", () => {
+    const { error, value } = envValidationSchema.validate({
+      ...PROD_ENV,
+      METRICS_TOKEN: "a-sufficiently-long-metrics-secret",
+    });
+    expect(error).toBeUndefined();
+    expect(value.METRICS_TOKEN).toBe("a-sufficiently-long-metrics-secret");
   });
 });

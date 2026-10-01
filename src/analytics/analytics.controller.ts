@@ -5,7 +5,7 @@ import { ANALYTICS_METRICS, AnalyticsMetric, AnalyticsQuery } from "./analytics.
 import { AnalyticsQueryDto } from "./dto/analytics-query.dto";
 
 @ApiTags("analytics")
-@Controller("api/v1/analytics")
+@Controller({ path: "analytics", version: "1" })
 export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
 

@@ -26,13 +26,6 @@ import { IntentsModule } from "../intents/intents.module";
   // intents from on-chain events). SolversModule supplies SolversService to
   // EventIngestionService and, via IntentsModule, also participates in the
   // cycle — so it is deferred too.
-  // module) form a CommonJS cycle. Both edges must be deferred — a bare import
-  // resolves to `undefined` when the peer module is still mid-initialisation.
-  // `forwardRef` is required on both sides: EventIngestionService reads an
-  // Intent back to date its confirmation metric, so SorobanModule needs
-  // IntentsModule, and IntentsModule already needs ShadowService from here.
-  // SolversModule supplies SolversService to EventIngestionService and, via
-  // IntentsModule, also participates in the cycle — so it is deferred too.
   imports: [forwardRef(() => IntentsModule), forwardRef(() => SolversModule)],
   controllers: [SorobanController, ShadowController],
   providers: [

@@ -21,7 +21,7 @@ import { logger } from "../common/logger";
  *
  * RFQ remains WebSocket-only — this endpoint is a read-only intent feed.
  */
-@Controller("api/v1/stream")
+@Controller({ path: "stream", version: "1" })
 export class IntentsSseController {
   constructor(
     private readonly feed: IntentFeedService,

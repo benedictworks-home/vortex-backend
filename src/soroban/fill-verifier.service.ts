@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Asset } from "@stellar/stellar-sdk";
+import { EgressPurpose, HttpEgressService } from "../common/http-egress";
 import { AppConfig, NETWORK_PASSPHRASES } from "../config/configuration";
 import { Intent } from "../intents/intents.types";
 
@@ -20,23 +21,35 @@ type HorizonTransaction = {
 /** Independently checks Horizon's indexed Stellar transaction and payment operations. */
 @Injectable()
 export class FillVerifierService {
-  constructor(private readonly config: ConfigService<AppConfig, true>) {}
+  private readonly egress: HttpEgressService;
+  private readonly horizonBase: string;
+
+  constructor(private readonly config: ConfigService<AppConfig, true>) {
+    const horizonUrl = config.get("stellar.horizonUrl", { infer: true });
+    this.horizonBase = horizonUrl.replace(/\/$/, "");
+    this.egress = new HttpEgressService({
+      timeoutMs: 10_000,
+      maxRedirects: 0,
+      maxBodySizeBytes: 1_048_576,
+      allowlist: [new URL(horizonUrl).hostname],
+      blockPrivateRanges: false,
+    });
+  }
 
   /**
    * Verify the transaction against the persisted intent. Unknown/indexing errors
    * remain retryable; malformed or mismatched transactions are definitive.
    */
   async verify(txHash: string, intent: Intent): Promise<FillVerificationVerdict> {
-    const base = this.config.get("stellar.horizonUrl", { infer: true }).replace(/\/$/, "");
+    const base = this.horizonBase;
     let transaction: HorizonTransaction;
     try {
-      // `base` is the operator-configured Horizon URL from app config (the host is
-      // never attacker-controlled) and txHash is path-encoded — no SSRF surface.
-      // eslint-disable-next-line no-restricted-syntax
-      const response = await fetch(`${base}/transactions/${encodeURIComponent(txHash)}`);
-      if (response.status === 404) return { status: "pending", reason: "not_indexed" };
-      if (!response.ok) return { status: "pending", reason: "horizon_unavailable" };
-      transaction = (await response.json()) as HorizonTransaction;
+      const response = await this.egress.fetch(`${base}/transactions/${encodeURIComponent(txHash)}`, {
+        purpose: EgressPurpose.HORIZON,
+      });
+      if (response.statusCode === 404) return { status: "pending", reason: "not_indexed" };
+      if (response.statusCode < 200 || response.statusCode >= 300) return { status: "pending", reason: "horizon_unavailable" };
+      transaction = JSON.parse(response.body) as HorizonTransaction;
     } catch {
       return { status: "pending", reason: "horizon_unavailable" };
     }
@@ -47,11 +60,11 @@ export class FillVerifierService {
     }
     if (!transaction._links?.operations?.href) return { status: "rejected", reason: "operations_missing" };
     try {
-      // Same operator-configured Horizon base URL as above — no SSRF surface.
-      // eslint-disable-next-line no-restricted-syntax
-      const response = await fetch(`${base}/transactions/${encodeURIComponent(txHash)}/operations?limit=200&order=asc`);
-      if (!response.ok) return { status: "pending", reason: "horizon_unavailable" };
-      const body = (await response.json()) as { _embedded?: { records?: Array<Record<string, unknown>> } };
+      const response = await this.egress.fetch(`${base}/transactions/${encodeURIComponent(txHash)}/operations?limit=200&order=asc`, {
+        purpose: EgressPurpose.HORIZON,
+      });
+      if (response.statusCode < 200 || response.statusCode >= 300) return { status: "pending", reason: "horizon_unavailable" };
+      const body = JSON.parse(response.body) as { _embedded?: { records?: Array<Record<string, unknown>> } };
       const operations = body._embedded?.records ?? [];
       for (const operation of operations) {
         const type = operation.type as string;

@@ -173,6 +173,38 @@ Upon subscription, the WebSocket server responds with a `subscribed` event:
 ```
 Subsequent `intent_created` events will only be broadcast to the bot if the intent's `srcChain` matches one of the subscribed chains.
 
+### RFQ Quote Requests
+Authenticated, active solvers with a positive bond and matching source-chain/token capabilities may receive a short-lived `rfq_request` over this WebSocket. The default response window is 300 ms and can be configured from 1 to 1,000 ms with `QUOTE_AUCTION_WINDOW_MS`.
+
+```json
+{
+  "type": "rfq_request",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "srcChain": "ethereum",
+  "srcTokenSymbol": "USDC",
+  "srcAmount": "1000000",
+  "dstTokenSymbol": "USDC",
+  "deadline": 1775836800300
+}
+```
+
+Reply before `deadline` with the gross destination amount, solver fee, expiry in Unix seconds, and a Stellar Ed25519 signature:
+
+```json
+{
+  "type": "rfq_response",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "dstAmount": "998500",
+  "fee": "100",
+  "expiresAt": 1775836860,
+  "signature": "base64EncodedSignatureString=="
+}
+```
+
+Sign the UTF-8 bytes of `vortex:rfq:v1:<requestId>:<payloadHash>`. `payloadHash` is the lowercase SHA-256 hex digest of the JSON encoding of the request fields (`requestId`, `srcChain`, `srcTokenSymbol`, `srcAmount`, `dstTokenSymbol`, optional `srcTokenAddress` and `dstTokenContract`, and `deadline`) plus `solver`, `dstAmount`, `fee`, and `expiresAt`. Omit absent optional fields and sort keys lexicographically before `JSON.stringify`. The signature is Base64-encoded. The backend accepts one valid response per solver and request; late, expired, malformed, or invalidly signed responses are ignored.
+
+Quotes are ranked by destination amount after solver and protocol fees, with reputation breaking ties. If no valid solver response arrives within the window, the API returns the existing model-based estimate with `indicative: true`; otherwise `indicative` is false.
+
 ### Event Replay & Reconnection
 On connection or reconnection, the bot can request event replay from its last received sequence ID (`seq`) to avoid missing intents during network blips:
 ```json

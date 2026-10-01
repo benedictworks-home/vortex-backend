@@ -46,6 +46,12 @@ export const JSON_MAX_DEPTH = 10;
  */
 export const BATCH_LOOKUP_MAX_IDS = 100;
 
+/**
+ * Maximum number of intents in a single `POST /api/v1/intents/batch-create`
+ * atomic intent creation request (issue #429).
+ */
+export const BATCH_CREATE_MAX_INTENTS = 50;
+
 // ── Pagination ───────────────────────────────────────────────────────────────
 
 /**

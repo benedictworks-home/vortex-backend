@@ -13,6 +13,17 @@ import { MemoryBackplane } from "../backplane/memory.backplane";
 import { EventRingBuffer } from "../event-ring-buffer";
 import { FeedClient, FeedAdmission, FeedFilter, FeedReplayResult } from "./feed.types";
 import { resolveClientIp } from "../ws/connection-state";
+import { verifyStellarSignature } from "../../common/stellar-signature";
+import { buildRfqResponseMessage } from "../../common/rfq-signature";
+import { RfqQuoteRequest, RfqResponseSignaturePayload, VerifiedRfqQuote } from "../rfq.types";
+
+interface PendingRfq {
+  request: RfqQuoteRequest;
+  eligibleSolvers: Set<string>;
+  responses: Map<string, VerifiedRfqQuote>;
+  resolve: (responses: VerifiedRfqQuote[]) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 /**
  * How many sequenced events to keep in the replay buffer.
@@ -46,6 +57,7 @@ export class IntentFeedService implements OnModuleDestroy {
 
   /** Connected clients and their per-connection filters. */
   private readonly clients = new Map<FeedClient, FeedFilter>();
+  private readonly pendingRfqs = new Map<string, PendingRfq>();
   /** Per-IP connection accounting (shared by WS and SSE). */
   private readonly connectionsPerIp = new Map<string, number>();
 
@@ -150,6 +162,119 @@ export class IntentFeedService implements OnModuleDestroy {
     return this.backplane.publish(event);
   }
 
+  requestRfq(
+    request: Omit<RfqQuoteRequest, "requestId" | "deadline">,
+    eligibleSolvers: string[],
+    windowMs: number,
+  ): Promise<VerifiedRfqQuote[]> {
+    const eligible = new Set(eligibleSolvers);
+    if (eligible.size === 0) return Promise.resolve([]);
+
+    const rfq: RfqQuoteRequest = {
+      ...request,
+      requestId: randomUUID(),
+      deadline: Date.now() + windowMs,
+    };
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => this.completeRfq(rfq.requestId), windowMs);
+      this.pendingRfqs.set(rfq.requestId, {
+        request: rfq,
+        eligibleSolvers: eligible,
+        responses: new Map(),
+        resolve,
+        timer,
+      });
+
+      void this.backplane
+        .publish({ type: "rfq_request", ...rfq, eligibleSolvers: [...eligible] })
+        .catch(() => this.completeRfq(rfq.requestId));
+    });
+  }
+
+  submitRfqResponse(response: {
+    solver: string;
+    requestId: string;
+    dstAmount: string;
+    fee: string;
+    expiresAt: number;
+    signature: string;
+  }): Promise<void> {
+    return this.backplane.publish({ type: "rfq_response", ...response });
+  }
+
+  private completeRfq(requestId: string): void {
+    const pending = this.pendingRfqs.get(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingRfqs.delete(requestId);
+    pending.resolve([...pending.responses.values()]);
+  }
+
+  private deliverRfqRequest(event: SequencedEvent): void {
+    const eligibleSolvers = (event as SequencedEvent & { eligibleSolvers?: unknown }).eligibleSolvers;
+    if (!Array.isArray(eligibleSolvers)) return;
+    const eligible = new Set(eligibleSolvers.filter((solver): solver is string => typeof solver === "string"));
+    const { seq, eligibleSolvers: _eligibleSolvers, ...request } = event as SequencedEvent & {
+      eligibleSolvers: string[];
+    };
+    const payload = JSON.stringify({ seq, ...request });
+
+    for (const [client, filter] of this.clients) {
+      if (filter.solver && eligible.has(filter.solver.solverAddress)) {
+        this.sendToClient(client, payload, seq);
+      }
+    }
+  }
+
+  private acceptRfqResponse(event: SequencedEvent): void {
+    const response = event as SequencedEvent & {
+      solver?: unknown;
+      requestId?: unknown;
+      dstAmount?: unknown;
+      fee?: unknown;
+      expiresAt?: unknown;
+      signature?: unknown;
+    };
+    const { solver, requestId, dstAmount, fee, expiresAt, signature } = response;
+    if (
+      typeof solver !== "string" ||
+      typeof requestId !== "string" ||
+      typeof dstAmount !== "string" ||
+      typeof fee !== "string" ||
+      typeof expiresAt !== "number" ||
+      typeof signature !== "string"
+    ) return;
+
+    const pending = this.pendingRfqs.get(requestId);
+    if (
+      !pending ||
+      Date.now() >= pending.request.deadline ||
+      !pending.eligibleSolvers.has(solver) ||
+      pending.responses.has(solver)
+    ) return;
+    if (!/^\d{1,78}$/.test(dstAmount) || !/^\d{1,78}$/.test(fee) || !Number.isSafeInteger(expiresAt)) return;
+
+    const now = Math.floor(Date.now() / 1000);
+    if (expiresAt <= now || expiresAt > now + 60) return;
+
+    try {
+      if (BigInt(dstAmount) <= BigInt(fee)) return;
+      const payload: RfqResponseSignaturePayload = {
+        ...pending.request,
+        solver,
+        dstAmount,
+        fee,
+        expiresAt,
+      };
+      verifyStellarSignature(solver, buildRfqResponseMessage(payload), signature);
+    } catch {
+      return;
+    }
+
+    pending.responses.set(solver, { solver, dstAmount, fee, expiresAt });
+  }
+
   /** Chains deliveries so async chain lookups cannot reorder events. */
   private enqueueDelivery(event: SequencedEvent): Promise<void> {
     const run = this.deliveryChain.then(() => this.deliver(event));
@@ -166,6 +291,15 @@ export class IntentFeedService implements OnModuleDestroy {
   private async deliver(sequencedEvent: SequencedEvent): Promise<void> {
     const enqueuedAt = Date.now();
     const { seq, ...event } = sequencedEvent;
+
+    if (event.type === "rfq_request") {
+      this.deliverRfqRequest(sequencedEvent);
+      return;
+    }
+    if (event.type === "rfq_response") {
+      this.acceptRfqResponse(sequencedEvent);
+      return;
+    }
 
     this.updateIndexForEvent(sequencedEvent);
     this.ringBuffer.push(sequencedEvent);
@@ -283,7 +417,7 @@ export class IntentFeedService implements OnModuleDestroy {
 
   /** Current sequence number (0 when no events have been broadcast). */
   get currentSeq(): number {
-    return this.ringBuffer.latestSeq();
+    return this.backplane.health().lastSeq;
   }
 
   // ── Solver capability ───────────────────────────────────────────────────
@@ -367,6 +501,7 @@ export class IntentFeedService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    for (const requestId of this.pendingRfqs.keys()) this.completeRfq(requestId);
     await this.backplane.close();
     for (const [client] of this.clients) {
       this.removeClient(client);

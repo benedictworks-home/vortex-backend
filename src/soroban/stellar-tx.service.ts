@@ -87,24 +87,6 @@ export interface InvokeContractParams {
   args: xdr.ScVal[];
 }
 
-/**
- * Time bound (seconds) on every transaction built by {@link StellarTxService.invokeContract}.
- * After this the network rejects the envelope, which is what lets the outbox
- * relay treat a NOT_FOUND envelope hash as "never landed, safe to rebuild"
- * once its processing lease (OUTBOX_LEASE_SECONDS) has expired (issue #396).
- */
-export const INVOKE_TX_TIMEOUT_SECONDS = 30;
-
-export interface InvokeContractOptions {
-  /**
-   * Called with the signed envelope's hash after signing and *before*
-   * broadcast (issue #396). If it throws, nothing is submitted. The outbox
-   * relay uses this to durably record the hash so a crash mid-submit can be
-   * detected on retry instead of double-submitting.
-   */
-  beforeSubmit?: (envelopeHash: string) => Promise<void>;
-}
-
 export interface InvokeContractResult {
   hash: string;
   status: string;
@@ -281,10 +263,7 @@ export class StellarTxService {
    *   3. Sign and submit the (now-prepared) original transaction.
    *   4. Confirm and return the result.
    */
-  async invokeContract(
-    params: InvokeContractParams,
-    options: InvokeContractOptions = {},
-  ): Promise<InvokeContractResult> {
+  async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
     // Issue #477 — the last gate before anything touches the chain. Checking
     // here rather than only in controllers also covers background callers (the
     // sweeper, event ingestion) that never pass through an HTTP guard.
@@ -321,7 +300,7 @@ export class StellarTxService {
         .addOperation(
           new Contract(params.contractId).call(params.method, ...params.args),
         )
-        .setTimeout(INVOKE_TX_TIMEOUT_SECONDS)
+        .setTimeout(30)
         .build();
       let simulation = await this.sorobanService.simulateTransaction(rawTx);
 
@@ -351,8 +330,6 @@ export class StellarTxService {
       // Assemble with Soroban data + fee.
       const prepared = await this.sorobanService.prepareTransaction(rawTx);
       const signed = await this.signerService.sign(prepared as Transaction);
-
-      await options.beforeSubmit?.(signed.hash().toString("hex"));
 
       const submittedAt = Date.now();
       const sendResponse = await this.sorobanService.submitTransaction(signed);
@@ -643,27 +620,6 @@ export class StellarTxService {
       // actually receive.
       .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
       .setTimebounds(now, now + this.simulationTimeoutSeconds)
-      .addOperation(
-        // The SDK expects `func` to be a fully-formed xdr.HostFunction that
-        // already carries its InvokeContractArgs; a bare enum value (and the
-        // SDK-11 style `args` array) produces an envelope that cannot be XDR
-        // encoded. The token argument mirrors the settlement contract's
-        // `native` (XLM) entry point — irrelevant to a simulation, but the
-        // ScVal must be well-formed for the envelope to decode.
-        Operation.invokeHostFunction({
-          func: xdr.HostFunction.hostFunctionTypeInvokeContract(
-            new xdr.InvokeContractArgs({
-              contractAddress: contract.toScAddress(),
-              // InvokeContractArgs takes the method name as a plain string and
-              // encodes it as a symbol itself, so no nativeToScVal here.
-              functionName: params.method,
-              args: params.args,
-            }),
-          ),
-          auth: [],
-        }),
-      )
-      .setTimeout(this.simulationTimeoutSeconds)
       .build();
   }
 

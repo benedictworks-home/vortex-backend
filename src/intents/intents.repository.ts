@@ -2,7 +2,6 @@ import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import { Intent, IntentState } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
-import { intentExposureUsdMicros } from "./intent-exposure";
 
 /**
  * NestJS injection token for the intents repository.
@@ -57,6 +56,17 @@ export interface IIntentsRepository {
   update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
 
   /**
+   * Atomically replace an open intent's minimum output and deadline while its
+   * current deadline is still in the future. Returns null when the intent is
+   * missing, no longer open, or already expired.
+   */
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now?: number,
+  ): Intent | null | Promise<Intent | null>;
+
+  /**
    * Remove a stored intent. Used only for in-memory retention sweeps for stale
    * terminal-state records; Prisma-backed stores ignore this call by design.
    */
@@ -82,19 +92,6 @@ export interface IIntentsRepository {
     newDeadline: number,
     now?: number,
   ): Intent | null | Promise<Intent | null>;
-
-  /**
-   * Atomically enforce the solver-wide accepted-exposure cap and accept an
-   * open intent. Implementations must serialize this check per solver.
-   */
-  acceptIfOpenWithinExposure(
-    id: string,
-    solver: string,
-    newDeadline: number,
-    now: number,
-    candidateExposureUsdMicros: bigint,
-    maxExposureUsdMicros: bigint,
-  ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> | { intent: Intent | null; exposureExceeded: boolean };
 
   /**
    * Atomically transition an intent from `accepted` → `filled` only if it is
@@ -210,6 +207,20 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return updated;
   }
 
+  amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now = Math.floor(Date.now() / 1000),
+  ): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open" || existing.deadline <= now || patch.deadline <= now) {
+      return null;
+    }
+    const updated: Intent = { ...existing, ...patch };
+    this.store.set(id, updated);
+    return updated;
+  }
+
   delete(id: string): boolean {
     return this.store.delete(id);
   }
@@ -224,32 +235,6 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const updated: Intent = { ...existing, state: "accepted", solver, deadline: newDeadline };
     this.store.set(id, updated);
     return updated;
-  }
-
-  acceptIfOpenWithinExposure(
-    id: string,
-    solver: string,
-    newDeadline: number,
-    now: number,
-    candidateExposureUsdMicros: bigint,
-    maxExposureUsdMicros: bigint,
-  ): { intent: Intent | null; exposureExceeded: boolean } {
-    const existing = this.store.get(id);
-    if (!existing || existing.state !== "open" || existing.deadline <= now) {
-      return { intent: null, exposureExceeded: false };
-    }
-    let acceptedExposure = 0n;
-    for (const intent of this.store.values()) {
-      if (intent.state === "accepted" && intent.solver?.toLowerCase() === solver.toLowerCase()) {
-        acceptedExposure += intentExposureUsdMicros(intent, now);
-      }
-    }
-    if (acceptedExposure + candidateExposureUsdMicros > maxExposureUsdMicros) {
-      return { intent: null, exposureExceeded: true };
-    }
-    const updated: Intent = { ...existing, state: "accepted", solver, deadline: newDeadline };
-    this.store.set(id, updated);
-    return { intent: updated, exposureExceeded: false };
   }
 
   fillIfAccepted(

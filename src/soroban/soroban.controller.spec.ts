@@ -25,10 +25,6 @@ describe("SorobanController", () => {
     // `reset`, not `clear`: `mockResolvedValueOnce` queues survive
     // `clearAllMocks`, so a leftover one-shot from the previous test would be
     // served before the rejection this test installs.
-    // `resetAllMocks`, not `clearAllMocks`: `clearAllMocks` only drops recorded
-    // calls and leaves queued `mockResolvedValueOnce` / `mockRejectedValueOnce`
-    // implementations in place, so a leftover value from an earlier test is
-    // served ahead of the one the current test queued.
     jest.resetAllMocks();
 
     const module: TestingModule = await Test.createTestingModule({
@@ -51,22 +47,21 @@ describe("SorobanController", () => {
   // getHealth
   // -------------------------------------------------------------------------
 
-  // The pre-existing test references `getHealth` which was renamed `getChainHealth`.
-  // Patch the mock and the calls to use the new method name.
-  describe("getChainHealth", () => {
-    it("calls sorobanService.getEndpointHealthReport and returns endpoints", async () => {
-      const mockEndpoints = [{ url: "https://rpc.example.com", state: "closed", score: 1, errorRate: 0, p95LatencyMs: 0, ledgerLag: 0, lastSuccessAt: null, lastErrorAt: null, consecutiveErrors: 0 }];
-      const svc = controller["sorobanService"] as unknown as { getEndpointHealthReport: jest.Mock };
-      svc.getEndpointHealthReport = jest.fn().mockReturnValue(mockEndpoints);
+  describe("getHealth", () => {
+    it("calls sorobanService.getHealth and returns its result", async () => {
+      const mockResult = { status: "healthy" };
+      mockSorobanService.getHealth.mockResolvedValueOnce(mockResult);
 
-      const result = controller.getChainHealth();
-      expect(result).toEqual({ endpoints: mockEndpoints });
+      const result = await controller.getHealth();
+
+      expect(mockSorobanService.getHealth).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(mockResult);
     });
 
-    it("propagates errors from sorobanService.getEndpointHealthReport", () => {
-      const svc = controller["sorobanService"] as unknown as { getEndpointHealthReport: jest.Mock };
-      svc.getEndpointHealthReport = jest.fn().mockImplementation(() => { throw new Error("rpc down"); });
-      expect(() => controller.getChainHealth()).toThrow("rpc down");
+    it("propagates errors from sorobanService.getHealth", async () => {
+      mockSorobanService.getHealth.mockRejectedValueOnce(new Error("rpc down"));
+
+      await expect(controller.getHealth()).rejects.toThrow("rpc down");
     });
   });
 

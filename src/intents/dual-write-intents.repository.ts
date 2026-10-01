@@ -120,6 +120,16 @@ export class DualWriteIntentsRepository implements IIntentsRepository {
     return this.mirrored("update", this.primary.update(id, patch, expectedVersion));
   }
 
+  async amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now?: number,
+  ): Promise<Intent | null> {
+    const amended = this.primary.amendIfOpen(id, patch, now);
+    if (amended) await this.mirror("amendIfOpen", amended);
+    return amended;
+  }
+
   /**
    * Deletes from memory only. Retention eviction exists to bound process
    * memory; Postgres keeps the durable history.

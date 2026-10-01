@@ -51,21 +51,6 @@ export class MetricsService implements OnModuleInit {
 
   /** Feature-flag evaluations (issue #495). */
   public readonly flagEvaluations: client.Counter<string>;
-  // ── WS backplane (issue #454) ─────────────────────────────────────────────
-  public readonly wsBackplanePublishDuration: client.Histogram<string>;
-  public readonly wsBackplaneDropped: client.Counter<string>;
-  public readonly wsBackplaneConnected: client.Gauge<string>;
-
-  // ── WS hardening (issue #455) ─────────────────────────────────────────────
-  public readonly wsConnectionsRejected: client.Counter<string>;
-  public readonly wsRateLimited: client.Counter<string>;
-  public readonly wsOutboundDropped: client.Counter<string>;
-  public readonly wsSlowConsumerDisconnects: client.Counter<string>;
-
-  // ── Health (issue #492) ───────────────────────────────────────────────────
-  public readonly healthIndicatorUp: client.Gauge<string>;
-  public readonly healthReady: client.Gauge<string>;
-  public readonly healthCheckDuration: client.Histogram<string>;
 
   /**
    * Sweeper metrics — these replace the retired src/common/metrics.ts
@@ -101,7 +86,6 @@ export class MetricsService implements OnModuleInit {
 
   // ── Solver-registry event ingestion (issue #399) ──────────────────────────
   public readonly solverRegistryEventsTotal: client.Counter<string>;
-  public readonly legacyStellarSignatures: client.Counter<string>;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
@@ -110,7 +94,7 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestDuration = new client.Histogram({
       name: `${prefix}http_request_duration_seconds`,
       help: "HTTP request duration in seconds",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
       registers: [this.register],
     });
@@ -118,14 +102,14 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestTotal = new client.Counter({
       name: `${prefix}http_requests_total`,
       help: "Total number of HTTP requests",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 
     this.httpRequestErrors = new client.Counter({
       name: `${prefix}http_request_errors_total`,
       help: "Total number of HTTP request errors (5xx)",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 
@@ -232,13 +216,6 @@ export class MetricsService implements OnModuleInit {
       registers: [this.register],
     });
 
-    this.legacyStellarSignatures = new client.Counter({
-      name: `${prefix}legacy_stellar_signatures_total`,
-      help: "Accepted version 1 Stellar intent signatures during the deprecation window",
-      labelNames: ["action"],
-      registers: [this.register],
-    });
-
     // ── Shadow-mode divergence monitor (issue #401) ──────────────────────────
     this.shadowComparisons = new client.Counter({
       name: `${prefix}shadow_comparisons_total`,
@@ -327,69 +304,6 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}flag_evaluations_total`,
       help: "Feature-flag evaluations by flag, resolved value and reason",
       labelNames: ["flag", "value", "reason"],
-      registers: [this.register],
-    });
-
-    // ── WS backplane (issue #454) ────────────────────────────────────────────
-    this.wsBackplanePublishDuration = new client.Histogram({
-      name: `${prefix}ws_backplane_publish_duration_seconds`,
-      help: "Time to sequence one WS event through the Redis backplane",
-      buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1],
-      registers: [this.register],
-    });
-    this.wsBackplaneDropped = new client.Counter({
-      name: `${prefix}ws_backplane_dropped_total`,
-      help: "WS events dropped by the backplane, by reason",
-      labelNames: ["reason"],
-      registers: [this.register],
-    });
-    this.wsBackplaneConnected = new client.Gauge({
-      name: `${prefix}ws_backplane_connected`,
-      help: "1 while this replica is reading from the Redis backplane",
-      registers: [this.register],
-    });
-
-    // ── WS hardening (issue #455) ────────────────────────────────────────────
-    this.wsConnectionsRejected = new client.Counter({
-      name: `${prefix}ws_connections_rejected_total`,
-      help: "WS connections refused at admission, by reason (max_connections, per_ip)",
-      labelNames: ["reason"],
-      registers: [this.register],
-    });
-    this.wsRateLimited = new client.Counter({
-      name: `${prefix}ws_rate_limited_total`,
-      help: "Inbound WS messages rejected by the per-connection token bucket, by action",
-      labelNames: ["action"],
-      registers: [this.register],
-    });
-    this.wsOutboundDropped = new client.Counter({
-      name: `${prefix}ws_outbound_dropped_total`,
-      help: "Outbound WS messages dropped for slow consumers (drop-oldest policy)",
-      registers: [this.register],
-    });
-    this.wsSlowConsumerDisconnects = new client.Counter({
-      name: `${prefix}ws_slow_consumer_disconnects_total`,
-      help: "WS connections closed because their outbound queue exceeded its bound",
-      registers: [this.register],
-    });
-
-    // ── Health (issue #492) ──────────────────────────────────────────────────
-    this.healthIndicatorUp = new client.Gauge({
-      name: `${prefix}health_indicator_up`,
-      help: "1 when the named health indicator's last check passed, else 0",
-      labelNames: ["indicator"],
-      registers: [this.register],
-    });
-    this.healthReady = new client.Gauge({
-      name: `${prefix}health_ready`,
-      help: "1 when this replica reports ready (after hysteresis), else 0",
-      registers: [this.register],
-    });
-    this.healthCheckDuration = new client.Histogram({
-      name: `${prefix}health_check_duration_seconds`,
-      help: "Duration of background health-indicator checks",
-      labelNames: ["indicator"],
-      buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 3],
       registers: [this.register],
     });
   }

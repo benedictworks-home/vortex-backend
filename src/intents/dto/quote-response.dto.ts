@@ -1,4 +1,4 @@
-import { ApiProperty } from "@nestjs/swagger";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { TokenInfo } from "../intents.types";
 
 export class RouteStepDto {
@@ -51,20 +51,8 @@ export class QuoteDto {
   @ApiProperty({ description: "Destination amount as a string" })
   dstAmount!: string;
 
-  @ApiProperty({ description: "Protocol fee as a string (base units). Ceil of bps, so at most 1 above truncating division before caps." })
+  @ApiProperty({ description: "Protocol fee as a string" })
   fee!: string;
-
-  @ApiProperty({ description: "Portion of the protocol fee credited to the treasury" })
-  treasuryFee!: string;
-
-  @ApiProperty({ description: "Portion of the protocol fee credited to the integrator (0 without a referral)" })
-  integratorFee!: string;
-
-  @ApiProperty({ description: "Version of the fee rule applied" })
-  feeRuleVersion!: number;
-
-  @ApiProperty({ nullable: true, description: "Referral code applied to this quote, if any" })
-  referralCode!: string | null;
 
   @ApiProperty({ description: "Estimated fill time in seconds" })
   fillTime!: number;
@@ -112,4 +100,7 @@ export class QuoteResponseDto {
 
   @ApiProperty({ description: "Price impact for the best quote as a decimal fraction (0 when no quote available)" })
   priceImpact!: number;
+
+  @ApiPropertyOptional({ description: "True when no solver responded and the returned quote is indicative" })
+  indicative?: boolean;
 }

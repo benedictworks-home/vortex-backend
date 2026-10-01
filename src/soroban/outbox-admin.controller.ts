@@ -11,7 +11,7 @@ import { IOutboxRepository, OUTBOX_REPOSITORY } from "./outbox.repository";
  */
 @ApiTags("admin")
 @ApiHeader({ name: "x-admin-key", required: true })
-@Controller("api/v1/admin/outbox")
+@Controller({ path: "admin/outbox", version: "1" })
 @UseGuards(AdminGuard)
 @RequireAdminRole("admin")
 export class OutboxAdminController {

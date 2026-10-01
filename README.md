@@ -43,11 +43,27 @@ GET  /api/v1/stats                — protocol stats
 GET  /health                      — service health
 WS   /ws                          — real-time intent feed
 GET  /docs                        — Swagger / OpenAPI docs
+GET  /docs/v1                     — OpenAPI UI for API v1
+GET  /docs/v2                     — OpenAPI UI for API v2
 GET  /api/v1/chain/health         — Soroban RPC health (read-only)
 GET  /api/v1/chain/ledger         — latest Soroban ledger
 GET  /api/v1/chain/network        — Soroban network info
 GET  /api/v1/chain/account/:key   — Stellar account lookup
 ```
+
+### API version lifecycle
+
+HTTP API versions use Nest URI versioning and retain the `/api/vN/...` URL
+shape. `/docs/v1-json` and `/docs/v2-json` serve version-specific OpenAPI
+documents; the legacy `/docs-json` remains available as the combined document.
+New controller versions are selected with Nest's controller `version`
+metadata.
+
+Deprecation headers are enabled per version by setting `API_V1_DEPRECATED_AT`
+to an ISO-8601 date. `API_V1_SUNSET_AT` adds the corresponding `Sunset` header,
+and `API_V1_DEPRECATION_LINK` adds a `Link` header with `rel="deprecation"`.
+These headers are omitted until configured. HTTP request counters and latency
+histograms include a `version` label (`v1`, `v2`, or `unversioned`).
 
 ---
 
