@@ -42,6 +42,9 @@ export class SorobanService {
    * the `{ header: { closeTime } }` shape the ingestion loop reads.
    */
   async getLedger(sequence: number): Promise<{ header?: { closeTime?: string } }> {
+    // `this.rpcUrl` is the operator-configured RPC endpoint from app config —
+    // the host is never attacker-controlled, so there is no SSRF surface here.
+    // eslint-disable-next-line no-restricted-syntax
     const response = await fetch(this.rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

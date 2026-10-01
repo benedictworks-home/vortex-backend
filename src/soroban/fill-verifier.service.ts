@@ -30,6 +30,9 @@ export class FillVerifierService {
     const base = this.config.get("stellar.horizonUrl", { infer: true }).replace(/\/$/, "");
     let transaction: HorizonTransaction;
     try {
+      // `base` is the operator-configured Horizon URL from app config (the host is
+      // never attacker-controlled) and txHash is path-encoded — no SSRF surface.
+      // eslint-disable-next-line no-restricted-syntax
       const response = await fetch(`${base}/transactions/${encodeURIComponent(txHash)}`);
       if (response.status === 404) return { status: "pending", reason: "not_indexed" };
       if (!response.ok) return { status: "pending", reason: "horizon_unavailable" };
@@ -44,6 +47,8 @@ export class FillVerifierService {
     }
     if (!transaction._links?.operations?.href) return { status: "rejected", reason: "operations_missing" };
     try {
+      // Same operator-configured Horizon base URL as above — no SSRF surface.
+      // eslint-disable-next-line no-restricted-syntax
       const response = await fetch(`${base}/transactions/${encodeURIComponent(txHash)}/operations?limit=200&order=asc`);
       if (!response.ok) return { status: "pending", reason: "horizon_unavailable" };
       const body = (await response.json()) as { _embedded?: { records?: Array<Record<string, unknown>> } };
