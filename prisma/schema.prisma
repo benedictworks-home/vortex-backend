@@ -5,6 +5,19 @@
 
 generator client {
   provider = "prisma-client-js"
+
+  // Issue #491 — Multi-arch distroless image
+  //
+  // Pre-fetch query-engine binaries for both target architectures so the
+  // final distroless image works on amd64 and arm64 without runtime downloads.
+  //
+  // "native"                     → current build host (auto-detected)
+  // "debian-openssl-3.0.x"       → linux/amd64 distroless/nodejs20-debian12
+  // "linux-arm64-openssl-3.0.x"  → linux/arm64 distroless/nodejs20-debian12
+  //
+  // Both distroless targets ship libssl3 (OpenSSL 3.x); OpenSSL 1.x targets
+  // are intentionally excluded.
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-arm64-openssl-3.0.x"]
 }
 
 datasource db {
