@@ -10,7 +10,7 @@ import {
   Param,
   Post,
   Query,
-  ServiceUnavailableException,
+  UnprocessableEntityException,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -24,6 +24,7 @@ import {
   ApiTooManyRequestsResponse,
   ApiOperation,
   ApiServiceUnavailableResponse,
+  ApiUnprocessableEntityResponse,
 } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
@@ -31,20 +32,27 @@ import { IntentsGateway } from "./intents.gateway";
 import { SolversService } from "../solvers/solvers.service";
 import { TokensService } from "../tokens/tokens.service";
 import { RoutingService } from "../routing/routing.service";
-import { MAX_OPEN_INTENTS_PER_USER } from "./intents.service";
+import { MAX_OPEN_INTENTS_PER_USER, NewIntentData } from "./intents.service";
 import { CreateIntentDto } from "./dto/create-intent.dto";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
+import { AmendIntentDto } from "./dto/amend-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
+import {
+  BatchCreateIntentsDto,
+  BatchCreateIntentsResponseDto,
+} from "./dto/batch-create-intents.dto";
+import { BATCH_CREATE_MAX_INTENTS } from "../config/limits.config";
 import { UserThrottlerGuard } from "./user-throttler.guard";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
+  buildAmendMessage,
   buildCancelMessage,
   buildFillMessage,
 } from "../common/stellar-signature";
@@ -66,12 +74,9 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
-import { SolverBondService } from "../soroban/solver-bond.service";
-import { ProtocolParamsService } from "../governance/params.service";
-import { baseUnitsToUsdMicros, intentExposureUsdMicros } from "./intent-exposure";
 
 @ApiTags("intents")
-@Controller("api/v1/intents")
+@Controller({ path: "intents", version: "1" })
 export class IntentsController {
   constructor(
     private readonly intentsService: IntentsService,
@@ -81,8 +86,6 @@ export class IntentsController {
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
     config: ConfigService<AppConfig, true>,
-    private readonly solverBondService: SolverBondService,
-    private readonly protocolParamsService: ProtocolParamsService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
   }
@@ -334,6 +337,88 @@ export class IntentsController {
     return { intents, count: intents.length };
   }
 
+  /**
+   * POST /api/v1/intents/batch-create
+   *
+   * Issue #429 — Atomic batch intent creation endpoint.
+   * Creates up to N intents atomically (all-or-nothing) with per-item validation errors.
+   */
+  @Post("batch-create")
+  @UseGuards(UserThrottlerGuard, KillSwitchGuard)
+  @KillSwitchGate({ operation: "create" })
+  @ApiOperation({
+    summary: "Create multiple intents atomically",
+    description:
+      "Creates up to 50 intents in a single atomic (all-or-nothing) request. " +
+      "If any item fails validation or exceeds open intent limits, zero intents are created " +
+      "and per-item errors are reported.",
+  })
+  @ApiOkResponse({ type: BatchCreateIntentsResponseDto })
+  @ApiBadRequestResponse({ description: "Invalid request payload or empty batch" })
+  @ApiUnprocessableEntityResponse({ description: "Per-item validation errors or limits exceeded" })
+  async batchCreate(@Body() dto: BatchCreateIntentsDto) {
+    if (!dto.intents || !Array.isArray(dto.intents) || dto.intents.length === 0) {
+      throw new BadRequestException("Intents array must contain at least 1 item");
+    }
+
+    if (dto.intents.length > BATCH_CREATE_MAX_INTENTS) {
+      throw new BadRequestException(
+        `Batch size exceeds maximum allowed limit of ${BATCH_CREATE_MAX_INTENTS}`,
+      );
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const items: NewIntentData[] = [];
+
+    for (let i = 0; i < dto.intents.length; i++) {
+      const itemDto = dto.intents[i];
+      const srcToken = await this.tokensService.resolveSrcTokenOrThrow(
+        itemDto.srcChain as SupportedChain,
+        itemDto.srcTokenAddress,
+      );
+      const dstToken = await this.tokensService.resolveDstTokenOrThrow(itemDto.dstTokenContract);
+
+      items.push({
+        user: itemDto.user,
+        srcChain: itemDto.srcChain,
+        srcToken: {
+          address: itemDto.srcTokenAddress,
+          symbol: itemDto.srcTokenSymbol,
+          name: itemDto.srcTokenSymbol,
+          decimals: itemDto.srcTokenDecimals,
+          chain: itemDto.srcChain,
+          priceUSD: srcToken?.priceUSD,
+        },
+        srcAmount: itemDto.srcAmount,
+        dstToken: {
+          contract: itemDto.dstTokenContract,
+          symbol: itemDto.dstTokenSymbol,
+          decimals: itemDto.dstTokenDecimals,
+          priceUSD: dstToken?.priceUSD,
+        },
+        minDstAmount: itemDto.minDstAmount,
+        deadline: itemDto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[itemDto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      });
+    }
+
+    const result = await this.intentsService.createBatch(items);
+
+    if (result.errors.length > 0) {
+      throw new UnprocessableEntityException({
+        statusCode: 422,
+        message: "Batch intent creation failed validation",
+        created: [],
+        errors: result.errors,
+      });
+    }
+
+    for (const intent of result.created) {
+      this.intentsGateway.broadcast({ type: "intent_created", intent });
+    }
+
+    return { created: result.created, errors: [] };
+  }
+
   @Post(":id/accept")
   @UseGuards(KillSwitchGuard)
   @KillSwitchGate({ operation: "accept" })
@@ -341,7 +426,6 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
-  @ApiServiceUnavailableResponse({ description: "Solver bond or a fresh USD price could not be verified" })
   async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
     // Fast-path snapshot only — guards below are advisory. The atomic
     // decision is the conditional `acceptIfOpen` write (state=open AND
@@ -366,6 +450,13 @@ export class IntentsController {
     // Verify the solver controls the claimed address before it can accept.
     verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
 
+    const solver = await this.solversService.get(dto.solver);
+    if (!solver?.isActive) {
+      throw new ForbiddenException("Solver not registered or inactive");
+    }
+    if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
+      throw new ForbiddenException("Solver has insufficient bond");
+    }
     if (this.solversService.isSuspended(dto.solver)) {
       throw new ForbiddenException("Solver is suspended by an active guardian action");
     }
@@ -375,44 +466,7 @@ export class IntentsController {
       throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
 
-    const chainBond = await this.solverBondService.getBond(dto.solver);
-    if (!chainBond.isActive || chainBond.bondAmount <= 0n) {
-      throw new ForbiddenException({
-        code: "INSUFFICIENT_BOND",
-        error: "Solver has no active on-chain bond",
-        message: "Solver has no active on-chain bond",
-      });
-    }
-
-    const xlmPrice = await this.tokensService.getUsdPrice("XLM");
-    const bondUsdMicros = baseUnitsToUsdMicros(chainBond.bondAmount, 7, xlmPrice);
-    const candidateExposureUsdMicros = intentExposureUsdMicros(intent, now);
-    const ratio = this.protocolParamsService.getCurrent().maxExposureRatio;
-    if (!Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
-      throw new ServiceUnavailableException({
-        code: "INVALID_EXPOSURE_RATIO",
-        error: "The configured maximum exposure ratio is invalid",
-      });
-    }
-    const ratioScale = 1_000_000_000n;
-    const ratioFixed = BigInt(Math.floor(ratio * Number(ratioScale)));
-    const maxExposureUsdMicros = (bondUsdMicros * ratioFixed) / ratioScale;
-
-    const capacity = await this.intentsService.acceptIfOpenWithinExposure(
-      id,
-      dto.solver,
-      candidateExposureUsdMicros,
-      maxExposureUsdMicros,
-      now,
-    );
-    if (capacity.exposureExceeded) {
-      throw new ForbiddenException({
-        code: "INSUFFICIENT_BOND",
-        error: "Accepted exposure would exceed the solver's bond limit",
-        message: "Accepted exposure would exceed the solver's bond limit",
-      });
-    }
-    const updated = capacity.intent;
+    const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
     if (!updated) {
       const current = await this.intentsService.get(id);
       if (!current) throw new NotFoundException("Intent not found");
@@ -538,6 +592,55 @@ export class IntentsController {
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;
+  }
+
+  /**
+   * Issue #569 — amend the terms of an open intent.
+   *
+   * Replaces `minDstAmount` and `deadline` on an intent that is still `open`
+   * and whose deadline has not passed. Both replacement values are covered by
+   * the creator's Ed25519 signature (see `buildAmendMessage`), so neither can
+   * change without the owner's consent. The write itself goes through
+   * `amendIfOpen`, whose state + deadline predicates make it race-free against
+   * a concurrent accept, and it deliberately does not bump `version` —
+   * widening the user's terms does not compete with solver writes.
+   */
+  @Post(":id/amend")
+  @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiForbiddenResponse({ description: "Unauthorized" })
+  @ApiConflictResponse({ description: "Intent is not amendable" })
+  async amend(@Param("id") id: string, @Body() dto: AmendIntentDto): Promise<Intent> {
+    const intent = await this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
+      throw new ForbiddenException("Unauthorized");
+    }
+
+    // The signature must cover the replacement values themselves, so a
+    // tampered minDstAmount or deadline fails verification before any write.
+    verifyStellarSignature(
+      dto.user,
+      buildAmendMessage(id, dto.user, dto.minDstAmount, dto.deadline),
+      dto.signature,
+    );
+
+    const amended = await this.intentsService.amendIfOpen(id, {
+      minDstAmount: dto.minDstAmount,
+      deadline: dto.deadline,
+    });
+    if (!amended) {
+      const current = await this.intentsService.get(id);
+      throw new ConflictException(`Cannot amend intent in state: ${current?.state ?? "unknown"}`);
+    }
+
+    this.intentsService.appendAuditEntry(id, "open", dto.user, "user amended", {
+      previousMinDstAmount: intent.minDstAmount,
+      minDstAmount: dto.minDstAmount,
+      previousDeadline: intent.deadline,
+      deadline: dto.deadline,
+    });
+
+    return amended;
   }
 
   /**

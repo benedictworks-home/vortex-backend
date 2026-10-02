@@ -129,6 +129,14 @@ export function buildRegisterMessage(address: string): string {
 }
 
 /**
+ * Canonical message a solver signs to prove a fill landed in time and cancel
+ * a pending slash during its challenge window (issue #397).
+ */
+export function buildFillProofMessage(intentId: string, solver: string, txHash: string): string {
+  return `fill-proof:${intentId}:${solver}:${txHash}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to change status.
  */
 export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "deregister", address: string): string {

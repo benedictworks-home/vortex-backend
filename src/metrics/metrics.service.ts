@@ -51,6 +51,21 @@ export class MetricsService implements OnModuleInit {
 
   /** Feature-flag evaluations (issue #495). */
   public readonly flagEvaluations: client.Counter<string>;
+  // ── WS backplane (issue #454) ─────────────────────────────────────────────
+  public readonly wsBackplanePublishDuration: client.Histogram<string>;
+  public readonly wsBackplaneDropped: client.Counter<string>;
+  public readonly wsBackplaneConnected: client.Gauge<string>;
+
+  // ── WS hardening (issue #455) ─────────────────────────────────────────────
+  public readonly wsConnectionsRejected: client.Counter<string>;
+  public readonly wsRateLimited: client.Counter<string>;
+  public readonly wsOutboundDropped: client.Counter<string>;
+  public readonly wsSlowConsumerDisconnects: client.Counter<string>;
+
+  // ── Health (issue #492) ───────────────────────────────────────────────────
+  public readonly healthIndicatorUp: client.Gauge<string>;
+  public readonly healthReady: client.Gauge<string>;
+  public readonly healthCheckDuration: client.Histogram<string>;
 
   /**
    * Sweeper metrics — these replace the retired src/common/metrics.ts
@@ -61,6 +76,8 @@ export class MetricsService implements OnModuleInit {
    */
   public readonly sweeperExpiredTotal: client.Counter<string>;
   public readonly sweeperSweepDurationMs: client.Histogram<string>;
+  /** Intents the low-frequency safety sweep expired or slashed. Steady state is ~0. */
+  public readonly sweeperSafetyCaughtTotal: client.Counter<string>;
 
   // ── SLO SLIs (issue #480) ─────────────────────────────────────────────────
   public readonly txConfirmationDuration: client.Histogram<string>;
@@ -86,6 +103,49 @@ export class MetricsService implements OnModuleInit {
 
   // ── Solver-registry event ingestion (issue #399) ──────────────────────────
   public readonly solverRegistryEventsTotal: client.Counter<string>;
+  public readonly legacyStellarSignatures: client.Counter<string>;
+
+  /** Dual-write / consistency-verifier metrics (issue #404). */
+  public readonly intentsDualWriteFailuresTotal: client.Counter<string>;
+  public readonly intentsStoreMismatches: client.Gauge<string>;
+  public readonly intentsStoreMismatchesTotal: client.Counter<string>;
+  public readonly intentsStoreVerifierRunsTotal: client.Counter<string>;
+
+  /** Contract version gating metrics (issue #402). */
+  public readonly contractVersionSupported: client.Gauge<string>;
+  public readonly contractUpgradesTotal: client.Counter<string>;
+  public readonly contractWritesBlockedTotal: client.Counter<string>;
+
+  /** Source-chain deposit verification (issue #403). */
+  public readonly srcVerificationsTotal: client.Counter<string>;
+  public readonly srcVerificationErrorsTotal: client.Counter<string>;
+  public readonly srcVerificationQueueSize: client.Gauge<string>;
+
+  /** Transactional outbox relay (issue #396). */
+  public readonly outboxRelayOutcomes: client.Counter<string>;
+  public readonly outboxDeadTotal: client.Counter<string>;
+  public readonly outboxBacklog: client.Gauge<string>;
+
+  /** Slashing saga (issue #397). */
+  public readonly slashTransitions: client.Counter<string>;
+
+  // ── Channel pool leasing (issue #473) ─────────────────────────────────────
+  /** Seconds spent waiting for a channel lease before the attempt resolved. */
+  public readonly channelLeaseWaitTime: client.Histogram<string>;
+  /** `Seq`-mismatch reconnects forced on a channel by a bad sequence number. */
+  public readonly channelBadSeqResyncs: client.Counter<string>;
+  /** Fraction (0..1) of the channel pool currently leased. */
+  public readonly channelPoolUtilisation: client.Gauge<string>;
+
+  // ── Transaction confirmation outcomes (issue #385) ────────────────────────
+  /** Tracked transaction outcomes, by status (confirmed | expired | …). */
+  public readonly txConfirmationOutcomes: client.Counter<string>;
+
+  // ── Fee-bump escalations (issue #454) ─────────────────────────────────────
+  /** Fee-bump transactions built, by inclusion-fee percentile. */
+  public readonly txFeeBumpTotal: client.Counter<string>;
+  /** Refusals to escalate past `maxFeeStroops` (page on any increase). */
+  public readonly txFeeBumpCeilingHits: client.Counter<string>;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
@@ -94,7 +154,7 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestDuration = new client.Histogram({
       name: `${prefix}http_request_duration_seconds`,
       help: "HTTP request duration in seconds",
-      labelNames: ["method", "route", "status_code", "version"],
+      labelNames: ["method", "route", "status_code"],
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
       registers: [this.register],
     });
@@ -102,14 +162,14 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestTotal = new client.Counter({
       name: `${prefix}http_requests_total`,
       help: "Total number of HTTP requests",
-      labelNames: ["method", "route", "status_code", "version"],
+      labelNames: ["method", "route", "status_code"],
       registers: [this.register],
     });
 
     this.httpRequestErrors = new client.Counter({
       name: `${prefix}http_request_errors_total`,
       help: "Total number of HTTP request errors (5xx)",
-      labelNames: ["method", "route", "status_code", "version"],
+      labelNames: ["method", "route", "status_code"],
       registers: [this.register],
     });
 
@@ -137,6 +197,12 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}sweeper_sweep_duration_ms`,
       help: "Duration of each IntentsSweeperService.sweep() execution in milliseconds",
       buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+      registers: [this.register],
+    });
+
+    this.sweeperSafetyCaughtTotal = new client.Counter({
+      name: `${prefix}sweeper_safety_caught_total`,
+      help: "Intents expired or slashed by the low-frequency safety sweep (lost deadline jobs). Should stay near zero.",
       registers: [this.register],
     });
 
@@ -213,6 +279,13 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}solver_registry_events_total`,
       help: "Solver-registry contract events ingested by type",
       labelNames: ["event_type"],
+      registers: [this.register],
+    });
+
+    this.legacyStellarSignatures = new client.Counter({
+      name: `${prefix}legacy_stellar_signatures_total`,
+      help: "Accepted version 1 Stellar intent signatures during the deprecation window",
+      labelNames: ["action"],
       registers: [this.register],
     });
 
@@ -306,6 +379,211 @@ export class MetricsService implements OnModuleInit {
       labelNames: ["flag", "value", "reason"],
       registers: [this.register],
     });
+
+    // ── WS backplane (issue #454) ────────────────────────────────────────────
+    this.wsBackplanePublishDuration = new client.Histogram({
+      name: `${prefix}ws_backplane_publish_duration_seconds`,
+      help: "Time to sequence one WS event through the Redis backplane",
+      buckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1],
+      registers: [this.register],
+    });
+    this.wsBackplaneDropped = new client.Counter({
+      name: `${prefix}ws_backplane_dropped_total`,
+      help: "WS events dropped by the backplane, by reason",
+      labelNames: ["reason"],
+      registers: [this.register],
+    });
+    this.wsBackplaneConnected = new client.Gauge({
+      name: `${prefix}ws_backplane_connected`,
+      help: "1 while this replica is reading from the Redis backplane",
+      registers: [this.register],
+    });
+
+    // ── WS hardening (issue #455) ────────────────────────────────────────────
+    this.wsConnectionsRejected = new client.Counter({
+      name: `${prefix}ws_connections_rejected_total`,
+      help: "WS connections refused at admission, by reason (max_connections, per_ip)",
+      labelNames: ["reason"],
+      registers: [this.register],
+    });
+    this.wsRateLimited = new client.Counter({
+      name: `${prefix}ws_rate_limited_total`,
+      help: "Inbound WS messages rejected by the per-connection token bucket, by action",
+      labelNames: ["action"],
+      registers: [this.register],
+    });
+    this.wsOutboundDropped = new client.Counter({
+      name: `${prefix}ws_outbound_dropped_total`,
+      help: "Outbound WS messages dropped for slow consumers (drop-oldest policy)",
+      registers: [this.register],
+    });
+    this.wsSlowConsumerDisconnects = new client.Counter({
+      name: `${prefix}ws_slow_consumer_disconnects_total`,
+      help: "WS connections closed because their outbound queue exceeded its bound",
+      registers: [this.register],
+    });
+
+    // ── Health (issue #492) ──────────────────────────────────────────────────
+    this.healthIndicatorUp = new client.Gauge({
+      name: `${prefix}health_indicator_up`,
+      help: "1 when the named health indicator's last check passed, else 0",
+      labelNames: ["indicator"],
+      registers: [this.register],
+    });
+    this.healthReady = new client.Gauge({
+      name: `${prefix}health_ready`,
+      help: "1 when this replica reports ready (after hysteresis), else 0",
+      registers: [this.register],
+    });
+    this.healthCheckDuration = new client.Histogram({
+      name: `${prefix}health_check_duration_seconds`,
+      help: "Duration of background health-indicator checks",
+      labelNames: ["indicator"],
+      buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 3],
+      registers: [this.register],
+    });
+
+    // ── Dual-write / consistency verifier (issue #404) ───────────────────────
+    this.intentsDualWriteFailuresTotal = new client.Counter({
+      name: `${prefix}intents_dual_write_failures_total`,
+      help: "Postgres mirror writes that failed while INTENTS_STORE=dual",
+      labelNames: ["operation"],
+      registers: [this.register],
+    });
+
+    this.intentsStoreMismatches = new client.Gauge({
+      name: `${prefix}intents_store_mismatches`,
+      help: "Mismatches between the memory and Postgres intent stores found by the last verifier run",
+      labelNames: ["kind"],
+      registers: [this.register],
+    });
+
+    this.intentsStoreMismatchesTotal = new client.Counter({
+      name: `${prefix}intents_store_mismatches_total`,
+      help: "Cumulative mismatches found by the dual-write consistency verifier",
+      labelNames: ["kind"],
+      registers: [this.register],
+    });
+
+    this.intentsStoreVerifierRunsTotal = new client.Counter({
+      name: `${prefix}intents_store_verifier_runs_total`,
+      help: "Completed dual-write consistency verifier runs",
+      registers: [this.register],
+    });
+
+    // ── Contract version gating (issue #402) ─────────────────────────────────
+    this.contractVersionSupported = new client.Gauge({
+      name: `${prefix}contract_version_supported`,
+      help: "1 when the deployed contract WASM maps to a supported ABI, 0 when writes are blocked",
+      labelNames: ["contract"],
+      registers: [this.register],
+    });
+
+    this.contractUpgradesTotal = new client.Counter({
+      name: `${prefix}contract_upgrades_total`,
+      help: "Contract WASM upgrades detected, by detection source (poll | event)",
+      labelNames: ["contract", "source"],
+      registers: [this.register],
+    });
+
+    this.contractWritesBlockedTotal = new client.Counter({
+      name: `${prefix}contract_writes_blocked_total`,
+      help: "On-chain writes refused because the contract version is unsupported",
+      labelNames: ["contract"],
+      registers: [this.register],
+    });
+
+    // ── Source-chain deposit verification (issue #403) ──────────────────────
+    this.srcVerificationsTotal = new client.Counter({
+      name: `${prefix}src_verifications_total`,
+      help: "Source-deposit verification outcomes, by chain and status",
+      labelNames: ["chain", "status"],
+      registers: [this.register],
+    });
+
+    this.srcVerificationErrorsTotal = new client.Counter({
+      name: `${prefix}src_verification_errors_total`,
+      help: "Source-deposit verification attempts that failed with an RPC error",
+      labelNames: ["chain", "reason"],
+      registers: [this.register],
+    });
+
+    this.srcVerificationQueueSize = new client.Gauge({
+      name: `${prefix}src_verification_queue_size`,
+      help: "Open intents awaiting (re-)verification of their source deposit",
+      registers: [this.register],
+    });
+
+    // ── Outbox relay (issue #396) ───────────────────────────────────────────
+    this.outboxRelayOutcomes = new client.Counter({
+      name: `${prefix}outbox_relay_outcomes_total`,
+      help: "Outbox rows processed by the relay, by outcome (submitted|simulated|confirmed|retry|dead)",
+      labelNames: ["outcome"],
+      registers: [this.register],
+    });
+
+    this.outboxDeadTotal = new client.Counter({
+      name: `${prefix}outbox_dead_total`,
+      help: "Outbox rows moved to dead after exhausting OUTBOX_MAX_ATTEMPTS (page on any increase)",
+      registers: [this.register],
+    });
+
+    this.outboxBacklog = new client.Gauge({
+      name: `${prefix}outbox_rows`,
+      help: "Current number of outbox rows by status",
+      labelNames: ["status"],
+      registers: [this.register],
+    });
+
+    // ── Slashing saga (issue #397) ──────────────────────────────────────────
+    this.slashTransitions = new client.Counter({
+      name: `${prefix}slash_pipeline_transitions_total`,
+      help: "Pending-slash state transitions, by target state and reason",
+      labelNames: ["to_state", "reason"],
+      registers: [this.register],
+    });
+
+    // ── Channel pool (issue #473) ───────────────────────────────────────────
+    this.channelLeaseWaitTime = new client.Histogram({
+      name: `${prefix}channel_lease_wait_seconds`,
+      help: "Seconds spent waiting for a channel lease",
+      buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
+      registers: [this.register],
+    });
+
+    this.channelBadSeqResyncs = new client.Counter({
+      name: `${prefix}channel_bad_seq_resyncs_total`,
+      help: "Channel reconnects forced by a bad sequence number",
+      registers: [this.register],
+    });
+
+    this.channelPoolUtilisation = new client.Gauge({
+      name: `${prefix}channel_pool_utilisation`,
+      help: "Fraction (0..1) of the channel pool currently leased",
+      registers: [this.register],
+    });
+
+    // ── Transaction confirmation outcomes (issue #385) ──────────────────────
+    this.txConfirmationOutcomes = new client.Counter({
+      name: `${prefix}tx_confirmation_outcomes_total`,
+      help: "Tracked transaction outcomes, by status",
+      labelNames: ["status"],
+      registers: [this.register],
+    });
+
+    // ── Fee-bump escalations (issue #454) ───────────────────────────────────
+    this.txFeeBumpTotal = new client.Counter({
+      name: `${prefix}tx_fee_bump_total`,
+      help: "Fee-bump transactions built, by inclusion-fee percentile",
+      labelNames: ["percentile"],
+      registers: [this.register],
+    });
+
+    this.txFeeBumpCeilingHits = new client.Counter({
+      name: `${prefix}tx_fee_bump_ceiling_hits_total`,
+      help: "Refusals to escalate past the configured max fee (stroops/op)",
+      registers: [this.register],
+    });
   }
 
   /** Registers the source sampled for `vortex_jobs_queue_depth` on each scrape. */
@@ -347,6 +625,14 @@ export class MetricsService implements OnModuleInit {
   recordSweep(expiredCount: number, durationMs: number): void {
     this.sweeperExpiredTotal.inc(expiredCount);
     this.sweeperSweepDurationMs.observe(durationMs);
+  }
+
+  /**
+   * Items the safety sweep had to settle because a deadline job did not.
+   * Called by IntentsSweeperService at the end of `sweep({ safety: true })`.
+   */
+  recordSafetyCatch(count: number): void {
+    if (count > 0) this.sweeperSafetyCaughtTotal.inc(count);
   }
 
   /**
@@ -458,5 +744,59 @@ export class MetricsService implements OnModuleInit {
   recordLeadershipLost(workerName: string): void {
     this.leaderElectionIsLeader.set({ worker: workerName }, 0);
     this.leaderElectionChangesTotal.inc({ worker: workerName, transition: "lost" });
+  }
+
+  /** Count a Postgres mirror write that failed in dual-write mode. */
+  recordDualWriteFailure(operation: string): void {
+    this.intentsDualWriteFailuresTotal.inc({ operation });
+  }
+
+  /** Publish one consistency-verifier run's mismatch counts, keyed by kind. */
+  recordStoreVerification(mismatches: Record<string, number>): void {
+    this.intentsStoreVerifierRunsTotal.inc();
+    for (const [kind, count] of Object.entries(mismatches)) {
+      this.intentsStoreMismatches.set({ kind }, count);
+      if (count > 0) this.intentsStoreMismatchesTotal.inc({ kind }, count);
+    }
+  }
+
+  setContractVersionSupported(contract: string, supported: boolean): void {
+    this.contractVersionSupported.set({ contract }, supported ? 1 : 0);
+  }
+
+  recordContractUpgrade(contract: string, source: "poll" | "event"): void {
+    this.contractUpgradesTotal.inc({ contract, source });
+  }
+
+  recordContractWriteBlocked(contract: string): void {
+    this.contractWritesBlockedTotal.inc({ contract });
+  }
+
+  recordSrcVerification(chain: string, status: string): void {
+    this.srcVerificationsTotal.inc({ chain, status });
+  }
+
+  recordSrcVerificationError(chain: string, reason: "rate_limited" | "rpc_error"): void {
+    this.srcVerificationErrorsTotal.inc({ chain, reason });
+  }
+
+  setSrcVerificationQueueSize(size: number): void {
+    this.srcVerificationQueueSize.set(size);
+  }
+
+  /** One outbox row outcome; `dead` also feeds the alerting counter. */
+  recordOutboxOutcome(outcome: "submitted" | "simulated" | "confirmed" | "retry" | "dead"): void {
+    this.outboxRelayOutcomes.inc({ outcome });
+    if (outcome === "dead") this.outboxDeadTotal.inc();
+  }
+
+  setOutboxBacklog(counts: Record<string, number>): void {
+    for (const [status, count] of Object.entries(counts)) {
+      this.outboxBacklog.set({ status }, count);
+    }
+  }
+
+  recordSlashTransition(toState: string, reason = "none"): void {
+    this.slashTransitions.inc({ to_state: toState, reason });
   }
 }

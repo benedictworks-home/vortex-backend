@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SorobanRpc, Transaction } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, SorobanRpc, Transaction, xdr } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 
 @Injectable()
@@ -73,6 +73,14 @@ export class SorobanService {
     return this.server.getEvents(request);
   }
 
+  /**
+   * Read raw ledger entries by key (contract-version probing reads a
+   * contract instance's WASM hash this way, with no simulation involved).
+   */
+  getLedgerEntries(...keys: xdr.LedgerKey[]): Promise<SorobanRpc.Api.GetLedgerEntriesResponse> {
+    return this.server.getLedgerEntries(...keys);
+  }
+
   getFeeStats(): Promise<SorobanRpc.Api.GetFeeStatsResponse> {
     return this.server.getFeeStats();
   }
@@ -89,7 +97,7 @@ export class SorobanService {
     return this.server.prepareTransaction(transaction) as Promise<Transaction>;
   }
 
-  submitTransaction(transaction: Transaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
+  submitTransaction(transaction: Transaction | FeeBumpTransaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
     return this.server.sendTransaction(transaction);
   }
 
