@@ -47,6 +47,7 @@ function buildIntents(scheduler: IntentDeadlineScheduler): IntentsService {
     undefined,
     undefined,
     undefined,
+    undefined,
     scheduler,
   );
 }

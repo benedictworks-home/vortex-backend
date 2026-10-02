@@ -21,6 +21,11 @@ enum IntentState {
   cancelled
   expired
   slashed
+  // Submitted-but-unconfirmed variants (issue #385).
+  pending_open
+  pending_accepted
+  pending_filled
+  pending_cancelled
 }
 
 enum SupportedChain {
@@ -71,6 +76,15 @@ enum KillSwitchOperation {
   onchain
 }
 
+/// Fill-verification lifecycle (issue #385 / DDL in
+/// 20260930000000_fill_verification): `pending` until the source-deposit side
+/// settles, then `verified` or `rejected`.
+enum FillVerificationState {
+  pending
+  verified
+  rejected
+}
+
 // ─── Intent ──────────────────────────────────────────────────────────────────
 // Represents a cross-chain swap request submitted by a user.
 // The nested token objects (srcToken / dstToken) are stored as JSONB so the
@@ -91,6 +105,10 @@ model Intent {
   dstToken       Json        @map("dst_token")
   /// Minimum acceptable destination amount (base unit string).
   minDstAmount   String      @map("min_dst_amount")
+  /// Optional off-chain Dutch auction terms (issue #507).
+  auction        Json?       @map("auction")
+  /// Auction price locked when a solver accepts.
+  acceptedDstAmount String?  @map("accepted_dst_amount")
   /// Best quote from solvers, populated after quoting.
   quotedDstAmount String?    @map("quoted_dst_amount")
   /// Solver address that accepted / filled this intent.
@@ -121,6 +139,15 @@ model Intent {
   srcTxHash      String?     @map("src_tx_hash")
   /// Last verification result: status, block, received amount, detail.
   srcVerification Json?      @map("src_verification")
+  /// USD value of `srcAmount` at creation (issue #440); null when the price
+  /// was unknown — historical rows are never backfilled.
+  usdValueAtCreate Float?    @map("usd_value_at_create")
+  /// Fill-verification timestamp written by the fill verifier.
+  fillVerifiedAt DateTime?   @map("fill_verified_at") @db.Timestamptz
+  /// Fill verification state ("pending" | "verified" | "rejected").
+  fillVerificationState FillVerificationState? @map("fill_verification_state")
+  /// Reason reported when fill verification rejected the fill.
+  fillVerificationReason String? @map("fill_verification_reason")
 
   @@index([user])
   @@index([state])
@@ -596,4 +623,187 @@ model PendingSlash {
   @@index([state, challengeEndsAt], name: "pending_slashes_due_idx")
   @@index([solverAddress], name: "pending_slashes_solver_idx")
   @@map("pending_slashes")
+}
+
+// ─── API key tiers (issue #441) ───────────────────────────────────────────────
+// API keys authenticate programmatic clients and carry a tier that selects the
+// distributed rate-limit quota. Keys are stored only as SHA-256 hashes; the
+// plaintext is shown once at creation and never persisted or logged.
+
+enum ApiKeyTier {
+  public
+  integrator
+  solver
+  partner
+}
+
+model ApiKey {
+  id        String     @id @default(uuid()) @map("id")
+  /// First 8 characters of the key — non-secret lookup handle.
+  keyPrefix String     @unique @map("key_prefix")
+  /// SHA-256 hash of the full key (hex-encoded).  Never store the plaintext.
+  keyHash   String     @map("key_hash")
+  tier      ApiKeyTier @map("tier")
+  /// Free-text owner label (e.g. "frontend", "solver-bot-1").
+  owner     String     @map("owner")
+  /// Optional scope strings narrowing what the key may do (e.g. ["intents:read"]).
+  scopes    Json       @default("[]") @map("scopes")
+  /// Unix epoch seconds.
+  createdAt Int        @map("created_at")
+  /// Unix epoch seconds; null while the key is active.
+  revokedAt Int?       @map("revoked_at")
+  /// Unix epoch seconds; null for keys that do not expire.
+  expiresAt Int?       @map("expires_at")
+  lastUsedAt Int?      @map("last_used_at")
+
+  @@index([tier])
+  @@map("api_keys")
+}
+
+model SolverCredential {
+  id            String   @id @default(uuid()) @map("id")
+  /// First 8 characters of the credential — non-secret lookup handle.
+  credPrefix    String   @unique @map("cred_prefix")
+  /// SHA-256 hash of the credential (hex-encoded).
+  credHash      String   @map("cred_hash")
+  /// Solver on-chain address this credential is bound to.
+  solverAddress String   @map("solver_address")
+  /// Allowed scope strings, e.g. ["quote:respond", "intents:accept"].
+  scopes        Json     @map("scopes")
+  /// Optional CIDR / IP allowlist the credential may be presented from.
+  ipAllowlist   Json?    @map("ip_allowlist")
+  /// Unix epoch seconds.
+  createdAt     Int      @map("created_at")
+  /// Unix epoch seconds; null for credentials that do not expire.
+  expiresAt     Int?     @map("expires_at")
+  /// Unix epoch seconds; null while the credential is active.
+  revokedAt     Int?     @map("revoked_at")
+  /// Unix epoch seconds of the last rotation (previous credential revoked).
+  rotatedAt     Int?     @map("rotated_at")
+  lastUsedAt    Int?     @map("last_used_at")
+
+  @@index([solverAddress])
+  @@map("solver_credentials")
+}
+
+// ─── Soroban event ingestion (transactional outbox lineage) ───────────────────
+// Idempotency + dead-letter tables for the versioned decoder registry (#390),
+// ledger-gap backfill (#391) and chain-authoritative reconciler (#392). The
+// models mirror the authoritative DDL in
+// 20260927000000_processed_events_dead_letters (keyed by the RPC event id
+// "<ledger>-<index>").
+
+model ProcessedEvent {
+  id          BigInt   @id @default(autoincrement()) @map("id")
+  /// RPC event id "<ledger>-<index>".
+  eventId     String   @map("event_id")
+  ledger      Int      @map("ledger")
+  eventIndex  Int      @map("event_index")
+  contractId  String   @map("contract_id")
+  /// Decoded topic[0] string.
+  topic       String   @map("topic")
+  txHash      String   @map("tx_hash")
+  processedAt DateTime @default(now()) @map("processed_at") @db.Timestamptz
+
+  @@unique([ledger, eventIndex], name: "processed_events_ledger_idx_key")
+  @@index([ledger], name: "processed_events_ledger_idx")
+  @@index([contractId], name: "processed_events_contract_idx")
+  @@map("processed_events")
+}
+
+model DeadLetterEvent {
+  id       BigInt @id @default(autoincrement()) @map("id")
+  /// RPC event id "<ledger>-<index>".
+  eventId  String @map("event_id")
+  ledger   Int    @map("ledger")
+  txHash   String @map("tx_hash")
+  /// Raw (undecoded) topic[0] string that failed schema validation.
+  rawTopic String @map("raw_topic")
+  /// Validation error message.
+  error    String @map("error")
+  /// JSON-encoded base64 XDR topic array, kept so operators can replay.
+  rawXdr   String @map("raw_xdr")
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz
+
+  @@index([ledger], name: "dead_letter_events_ledger_idx")
+  @@map("dead_letter_events")
+}
+
+// ─── Pending-transaction confirmation (issues #386–#389, PR #509) ────────────
+// DDL: 20260926000000_tx_confirmation_channel_pool_ingestion.
+
+enum PendingTxStatus {
+  pending
+  confirmed
+  failed
+  expired
+}
+
+model PendingTransaction {
+  id            BigInt          @id @default(autoincrement()) @map("id")
+  /// The Stellar transaction hash.
+  txHash        String          @unique @map("tx_hash")
+  /// XDR-encoded signed transaction envelope (base64), kept for fee-bump resubmission.
+  txXdr         String          @map("tx_xdr")
+  /// Associated intent identifier (nullable — not every tx is tied to one intent).
+  intentId      String?         @map("intent_id")
+  /// Channel account public key used for submission (nullable for main-key txs).
+  channelKey    String?         @map("channel_key")
+  status        PendingTxStatus @default(pending) @map("status")
+  /// Unix epoch seconds after which tracking is abandoned and the tx is marked expired.
+  maxTrackUntil Int             @map("max_track_until")
+  /// Number of poll attempts so far.
+  attempts      Int             @default(0) @map("attempts")
+  /// Unix epoch seconds of the next scheduled poll.
+  nextPollAt    Int             @default(0) @map("next_poll_at")
+  /// Fee in stroops of the most recent submission.
+  lastFeeStroops String?        @map("last_fee_stroops")
+  /// Number of fee-bump escalations applied so far.
+  feeBumpCount  Int             @default(0) @map("fee_bump_count")
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime        @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@index([status, nextPollAt], name: "pending_tx_poll_idx")
+  @@index([intentId], name: "pending_tx_intent_idx")
+  @@map("pending_transactions")
+}
+
+model IngestionCursor {
+  id           BigInt   @id @default(autoincrement()) @map("id")
+  network      String   @map("network")
+  contractId   String   @map("contract_id")
+  /// Last ledger sequence whose events have been fully applied.
+  lastLedger   Int      @map("last_ledger")
+  /// Index of the last applied event within lastLedger (for sub-ledger resume).
+  lastEventIdx Int      @default(0) @map("last_event_idx")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@unique([network, contractId], name: "ingestion_cursor_uniq")
+  @@map("ingestion_cursor")
+}
+
+model SignatureNonce {
+  signer    String @map("signer")
+  nonce     String @map("nonce")
+  expiresAt Int    @map("expires_at")
+
+  @@id([signer, nonce])
+  @@index([expiresAt])
+  @@map("signature_nonces")
+}
+
+// ─── Price history (price-feed worker, issue #566) ────────────────────────────
+// Append-only series backing the extreme-move circuit breaker; `tokens.price_usd`
+// holds the latest value, this table keeps the trail.
+
+model PriceHistory {
+  id         String   @id @default(uuid()) @map("id")
+  /// Token this sample belongs to (cascade-deleted with the token).
+  tokenId    String   @map("token_id")
+  priceUsd   Float    @map("price_usd")
+  /// Unix epoch seconds… wall-clock sample time (UTC).
+  recordedAt DateTime @map("recorded_at") @db.Timestamptz
+
+  @@index([tokenId, recordedAt], name: "price_history_token_idx")
+  @@map("price_history")
 }
