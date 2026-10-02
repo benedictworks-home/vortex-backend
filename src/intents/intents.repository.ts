@@ -6,56 +6,78 @@ import { buildSeedIntents } from "./intents.seed";
 /**
  * NestJS injection token for the intents repository.
  *
- * Use this token instead of a concrete class so any module can swap
- * InMemoryIntentsRepository for a Prisma-backed adapter without touching
- * IntentsService.
- *
  * @example
  *   \@Inject(INTENTS_REPOSITORY) private readonly repo: IIntentsRepository
  */
 export const INTENTS_REPOSITORY = Symbol("INTENTS_REPOSITORY");
 
+// ─── Optimistic-concurrency types (#404) ─────────────────────────────────────
+
 /**
- * Storage contract for intent records.
- *
- * All methods are synchronous for the in-memory adapter and return Promises
- * for the Prisma adapter — callers always `await` so both shapes work.
+ * Returned by mutations when the caller's `expectedVersion` does not match
+ * the row's actual version.  The caller should re-read the row, reconcile,
+ * and retry.
  */
+export class VersionConflict {
+  constructor(
+    readonly intentId: string,
+    readonly expectedVersion: number,
+    readonly actualVersion: number,
+  ) {}
+}
+
+export function isVersionConflict(result: unknown): result is VersionConflict {
+  return result instanceof VersionConflict;
+}
+
+/**
+ * Union of successful intent result and version conflict.
+ * All guarded mutation methods return this type.
+ */
+export type MutationResult = Intent | VersionConflict | null;
+
+// ─── Idempotency (#404) ───────────────────────────────────────────────────────
+
+export interface IdempotentCreateResult {
+  intent: Intent;
+  /** true when a new row was created; false when the key already existed (replay). */
+  created: boolean;
+}
+
+// ─── Patch type ───────────────────────────────────────────────────────────────
+
+export type IntentPatch = Partial<Omit<Intent, "intentId" | "createdAt">>;
+
+// ─── Repository interface ─────────────────────────────────────────────────────
+
 export interface IIntentsRepository {
-  /**
-   * Persist a fully-formed intent record and return it.
-   * If a record with the same intentId already exists it is overwritten.
-   */
   save(intent: Intent): Intent | Promise<Intent>;
-
-  /**
-   * Find an intent by its unique intentId.
-   * Returns `undefined` when no matching record exists.
-   */
   findById(id: string): Intent | undefined | Promise<Intent | undefined>;
-
-  /**
-   * Return all intent records sorted by createdAt descending.
-   */
   findAll(): Intent[] | Promise<Intent[]>;
-
-  /**
-   * Return all intents matching the given state, sorted by createdAt descending.
-   */
   findByState(state: IntentState): Intent[] | Promise<Intent[]>;
-
-  /**
-   * Return all intents belonging to the given user (case-insensitive address match).
-   */
   findByUser(user: string): Intent[] | Promise<Intent[]>;
+  findManyByIds(ids: string[]): Intent[] | Promise<Intent[]>;
+  countAcceptedBySolver(solver: string): number | Promise<number>;
+  countActiveByUser(user: string): number | Promise<number>;
 
   /**
-   * Apply a partial patch to an existing intent and return the updated record.
-   * Returns `null` when no record with the given id exists.
+   * Idempotent create: inserts only when no row exists for `idempotencyKey`
+   * with `createdAt >= minCreatedAt`.  Returns the existing row on replay.
    */
-  update(id: string, patch: Partial<Intent>): Intent | null | Promise<Intent | null>;
+  createIdempotent(
+    intent: Intent,
+    idempotencyKey: string,
+    minCreatedAt: number,
+  ): IdempotentCreateResult | Promise<IdempotentCreateResult>;
+
+  findByIdempotencyKey(
+    key: string,
+    minCreatedAt: number,
+  ): Intent | undefined | Promise<Intent | undefined>;
 
   /**
+   * Apply a partial patch.  Returns VersionConflict on stale write, null when
+   * the intent is not found.
    * Atomically replace an open intent's minimum output and deadline while its
    * current deadline is still in the future. Returns null when the intent is
    * missing, no longer open, or already expired.
@@ -70,28 +92,32 @@ export interface IIntentsRepository {
    * Remove a stored intent. Used only for in-memory retention sweeps for stale
    * terminal-state records; Prisma-backed stores ignore this call by design.
    */
+  update(
+    id: string,
+    patch: IntentPatch,
+    expectedVersion: number,
+  ): MutationResult | Promise<MutationResult>;
+
   delete(id: string): boolean | Promise<boolean>;
 
-  /**
-   * Atomically transition an intent from `open` → `accepted` only if it is
-   * currently in the `open` state AND its deadline is still in the future.
-   * Mirrors the DB pattern:
-   *   UPDATE intents SET state='accepted', solver=$2, deadline=$3
-   *   WHERE intent_id=$1 AND state='open' AND deadline > $4
-   *   RETURNING *
-   * Returns the updated intent on success, `null` when the intent is not
-   * found, already taken, or past deadline (sweeper wins the race).
-   *
-   * Lock ordering (issue #473): callers holding a per-solver advisory lock
-   * must acquire it BEFORE invoking this method; this method itself only
-   * touches the single intent row so no lock inversion is possible.
-   */
+  // ── Atomic state transitions ──────────────────────────────────────────────
+
   acceptIfOpen(
     id: string,
     solver: string,
     newDeadline: number,
     now?: number,
-  ): Intent | null | Promise<Intent | null>;
+    expectedVersion?: number,
+  ): MutationResult | Promise<MutationResult>;
+
+  acceptIfOpenWithinExposure(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now: number,
+    candidateExposureUsdMicros: bigint,
+    maxExposureUsdMicros: bigint,
+  ): Promise<{ intent: Intent | null; exposureExceeded: boolean }> | { intent: Intent | null; exposureExceeded: boolean };
 
   /**
    * Atomically transition an intent from `accepted` → `filled` only if it is
@@ -108,74 +134,45 @@ export interface IIntentsRepository {
   fillIfAccepted(
     id: string,
     solver: string,
-    patch: Omit<Partial<Intent>, "state" | "solver">,
+    patch: Pick<Partial<Intent>, "filledAt" | "fillAmount" | "feeAmount" | "txHash">,
     now?: number,
-  ): Intent | null | Promise<Intent | null>;
+    expectedVersion?: number,
+  ): MutationResult | Promise<MutationResult>;
 
-  /**
-   * Atomically transition an intent from `open` → `cancelled` only if it is
-   * currently in the `open` state.  Mirrors the DB pattern:
-   *   UPDATE intents SET state='cancelled'
-   *   WHERE intent_id=$1 AND state='open'
-   *   RETURNING *
-   * Returns the updated intent on success, `null` when the intent is not
-   * found or is not in the `open` state (e.g. already accepted or expired).
-   */
-  cancelIfOpen(id: string): Intent | null | Promise<Intent | null>;
+  cancelIfOpen(id: string, expectedVersion?: number): MutationResult | Promise<MutationResult>;
 
-  /**
-   * Atomically transition an intent from `open` → `expired` only if it is
-   * currently in the `open` state.  Guards the sweeper's expiry pass against
-   * a concurrent user cancel() or solver accept() on the same intent.
-   */
-  expireIfOpen(id: string): Intent | null | Promise<Intent | null>;
+  expireIfOpen(id: string, expectedVersion?: number): MutationResult | Promise<MutationResult>;
 
-  /**
-   * Atomically push an accepted intent's deadline out to at least `newDeadline`,
-   * only while it is still in the `accepted` state.  Mirrors the DB pattern:
-   *   UPDATE intents SET deadline=$2
-   *   WHERE intent_id=$1 AND state='accepted' AND deadline < $2
-   *   RETURNING *
-   *
-   * Issue #477: while an emergency pause covers `fill`, the sweeper cannot slash
-   * missed fills — but leaving the deadline untouched would expire those intents
-   * on the next cycle anyway and penalise the solver for a pause they did not
-   * cause.  The `deadline < $2` guard makes this idempotent and never shortens
-   * a window, and the state predicate means a concurrent fill or slash wins.
-   *
-   * Returns the updated intent, or `null` when the intent is no longer accepted
-   * or already has a later deadline.
-   */
   extendDeadlineIfAccepted(
     id: string,
     newDeadline: number,
-  ): Intent | null | Promise<Intent | null>;
+    expectedVersion?: number,
+  ): MutationResult | Promise<MutationResult>;
 
-  /**
-   * Atomically transition an intent from `accepted` → `slashed` only if it is
-   * currently in the `accepted` state.  Guards the sweeper's slashing pass
-   * against a concurrent solver fill().
-   */
   slashIfAccepted(
     id: string,
     patch: { slashedAt: number; slashReason: string },
-  ): Intent | null | Promise<Intent | null>;
+    expectedVersion?: number,
+  ): MutationResult | Promise<MutationResult>;
+
+  /**
+   * Version-guarded upsert used by the dual-write mirror.
+   * Only saves when the incoming version is >= the stored version.
+   */
+  saveIfNewer?(intent: Intent): Promise<Intent>;
 }
 
-/**
- * In-memory implementation of IIntentsRepository.
- *
- * Stores intents in a plain `Map` and seeds demo data on construction.
- * This adapter ships with the current in-memory backend; swap the binding in
- * IntentsModule to replace it with a Prisma-backed adapter — IntentsService
- * stays unchanged.
- */
+// ─── In-memory implementation ─────────────────────────────────────────────────
+
 @Injectable()
 export class InMemoryIntentsRepository implements IIntentsRepository {
   private readonly store = new Map<string, Intent>();
+  /** key → intentId (idempotency replay cache) */
+  private readonly idempotencyKeys = new Map<string, string>();
 
-  constructor() {
-    this.seed();
+  constructor(options?: { seed?: boolean }) {
+    const shouldSeed = options?.seed !== false;
+    if (shouldSeed) this.seed();
   }
 
   save(intent: Intent): Intent {
@@ -196,13 +193,59 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
   }
 
   findByUser(user: string): Intent[] {
-    return this.findAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+    const lower = user.toLowerCase();
+    return this.findAll().filter((i) => i.user.toLowerCase() === lower);
   }
 
-  update(id: string, patch: Partial<Intent>): Intent | null {
+  findManyByIds(ids: string[]): Intent[] {
+    const unique = [...new Set(ids)];
+    return unique.flatMap((id) => {
+      const i = this.store.get(id);
+      return i ? [i] : [];
+    });
+  }
+
+  countAcceptedBySolver(solver: string): number {
+    const lower = solver.toLowerCase();
+    return [...this.store.values()].filter(
+      (i) => i.state === "accepted" && i.solver?.toLowerCase() === lower,
+    ).length;
+  }
+
+  countActiveByUser(user: string): number {
+    const lower = user.toLowerCase();
+    return [...this.store.values()].filter(
+      (i) => (i.state === "open" || i.state === "accepted") && i.user.toLowerCase() === lower,
+    ).length;
+  }
+
+  createIdempotent(
+    intent: Intent,
+    idempotencyKey: string,
+    minCreatedAt: number,
+  ): IdempotentCreateResult {
+    const existing = this.findByIdempotencyKey(idempotencyKey, minCreatedAt);
+    if (existing) return { intent: existing, created: false };
+    this.save(intent);
+    this.idempotencyKeys.set(idempotencyKey, intent.intentId);
+    return { intent, created: true };
+  }
+
+  findByIdempotencyKey(key: string, minCreatedAt: number): Intent | undefined {
+    const id = this.idempotencyKeys.get(key);
+    if (!id) return undefined;
+    const intent = this.store.get(id);
+    if (!intent || intent.createdAt < minCreatedAt) return undefined;
+    return intent;
+  }
+
+  update(id: string, patch: IntentPatch, expectedVersion: number): MutationResult {
     const existing = this.store.get(id);
     if (!existing) return null;
-    const updated: Intent = { ...existing, ...patch };
+    if (existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, ...patch, version: existing.version + 1 };
     this.store.set(id, updated);
     return updated;
   }
@@ -225,45 +268,123 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return this.store.delete(id);
   }
 
-  acceptIfOpen(id: string, solver: string, newDeadline: number, now?: number): Intent | null {
+  saveIfNewer(intent: Intent): Promise<Intent> {
+    const existing = this.store.get(intent.intentId);
+    if (!existing || intent.version >= existing.version) {
+      this.store.set(intent.intentId, intent);
+    }
+    return Promise.resolve(this.store.get(intent.intentId)!);
+  }
+
+  // ── Atomic transitions ────────────────────────────────────────────────────
+
+  acceptIfOpen(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now?: number,
+    expectedVersion?: number,
+  ): MutationResult {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
-    // Deadline predicate pushed into the atomic check (issue #473): a solver
-    // racing the sweeper past expiry must lose even in-process.
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     if (existing.deadline <= nowSec) return null;
-    const updated: Intent = { ...existing, state: "accepted", solver, deadline: newDeadline };
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = {
+      ...existing,
+      state: "accepted",
+      solver,
+      deadline: newDeadline,
+      version: existing.version + 1,
+    };
     this.store.set(id, updated);
     return updated;
+  }
+
+  acceptIfOpenWithinExposure(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now: number,
+    candidateExposureUsdMicros: bigint,
+    maxExposureUsdMicros: bigint,
+  ): { intent: Intent | null; exposureExceeded: boolean } {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "open" || existing.deadline <= now) {
+      return { intent: null, exposureExceeded: false };
+    }
+    const lower = solver.toLowerCase();
+    let acceptedExposure = 0n;
+    for (const intent of this.store.values()) {
+      if (intent.state === "accepted" && intent.solver?.toLowerCase() === lower) {
+        acceptedExposure += intentExposureUsdMicros(intent, now);
+      }
+    }
+    if (acceptedExposure + candidateExposureUsdMicros > maxExposureUsdMicros) {
+      return { intent: null, exposureExceeded: true };
+    }
+    const updated: Intent = {
+      ...existing,
+      state: "accepted",
+      solver,
+      deadline: newDeadline,
+      version: existing.version + 1,
+    };
+    this.store.set(id, updated);
+    return { intent: updated, exposureExceeded: false };
   }
 
   fillIfAccepted(
     id: string,
     solver: string,
-    patch: Omit<Partial<Intent>, "state" | "solver">,
+    patch: Pick<Partial<Intent>, "filledAt" | "fillAmount" | "feeAmount" | "txHash">,
     now?: number,
-  ): Intent | null {
+    expectedVersion?: number,
+  ): MutationResult {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     if (existing.deadline <= nowSec) return null;
-    const updated: Intent = { ...existing, ...patch, state: "filled" };
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, ...patch, state: "filled", version: existing.version + 1 };
     this.store.set(id, updated);
     return updated;
   }
 
-  cancelIfOpen(id: string): Intent | null {
+  cancelIfOpen(id: string, expectedVersion?: number): MutationResult {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
-    const updated: Intent = { ...existing, state: "cancelled" };
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, state: "cancelled", version: existing.version + 1 };
     this.store.set(id, updated);
     return updated;
   }
 
-  expireIfOpen(id: string): Intent | null {
+  expireIfOpen(id: string, expectedVersion?: number): MutationResult {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
-    const updated: Intent = { ...existing, state: "expired" };
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, state: "expired", version: existing.version + 1 };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  extendDeadlineIfAccepted(id: string, newDeadline: number, expectedVersion?: number): MutationResult {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted") return null;
+    if (existing.deadline >= newDeadline) return null;
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, deadline: newDeadline, version: existing.version + 1 };
     this.store.set(id, updated);
     return updated;
   }
@@ -271,26 +392,19 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
   slashIfAccepted(
     id: string,
     patch: { slashedAt: number; slashReason: string },
-  ): Intent | null {
+    expectedVersion?: number,
+  ): MutationResult {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted") return null;
-    const updated: Intent = { ...existing, ...patch, state: "slashed" };
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, existing.version);
+    }
+    const updated: Intent = { ...existing, ...patch, state: "slashed", version: existing.version + 1 };
     this.store.set(id, updated);
     return updated;
   }
 
-  extendDeadlineIfAccepted(id: string, newDeadline: number): Intent | null {
-    const existing = this.store.get(id);
-    if (!existing || existing.state !== "accepted") return null;
-    // Never shorten: a later deadline is left untouched so repeated sweeps are
-    // no-ops rather than a countdown.
-    if (existing.deadline >= newDeadline) return null;
-    const updated: Intent = { ...existing, deadline: newDeadline };
-    this.store.set(id, updated);
-    return updated;
-  }
-
-  // ── seed ────────────────────────────────────────────────────────────────────
+  // ── Seed ────────────────────────────────────────────────────────────────────
 
   seed(): void {
     const now = Math.floor(Date.now() / 1000);
@@ -299,6 +413,8 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
         ...data,
         intentId: uuidv4(),
         createdAt: now - Math.floor(Math.random() * 600),
+        version: 0,
+        srcVerified: true,
       };
       this.store.set(intent.intentId, intent);
     }

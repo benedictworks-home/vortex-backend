@@ -1,3 +1,13 @@
+// Prisma schema for vortex-backend.
+// This file is the source of truth for `npx prisma generate`; the canonical
+// migration history lives in prisma/migrations/.
+//
+// Issues implemented in this file:
+//   #410 — src_token_id / dst_token_id FK columns + snapshot decimals
+//   #411 — DATABASE_REPLICA_URLS env var wired through datasource
+
+generator client {
+  provider = "prisma-client-js"
 // ─── Prisma Schema ────────────────────────────────────────────────────────────
 // Database: PostgreSQL (swap to sqlite for local dev / CI without a real DB)
 // Run `npm run db:generate` after editing this file.
@@ -46,6 +56,97 @@ enum SupportedChain {
   avalanche
 }
 
+enum TokenStatus {
+  active
+  paused
+  delisted
+}
+
+// ─── Tokens ──────────────────────────────────────────────────────────────────
+
+model Token {
+  id        String      @id @default(cuid())
+  address   String
+  symbol    String
+  name      String
+  decimals  Int
+  chain     SupportedChain
+  logoUri   String?     @map("logo_uri")
+  priceUsd  Float?      @map("price_usd")
+  isStellar Boolean     @default(false) @map("is_stellar")
+  status    TokenStatus @default(active)
+  assetKind String      @default("evm") @map("asset_kind")
+
+  // Back-references from intents (#410)
+  srcIntents Intent[] @relation("src_token")
+  dstIntents Intent[] @relation("dst_token")
+
+  @@unique([address, chain], name: "address_chain")
+  @@index([chain])
+  @@index([symbol])
+  @@map("tokens")
+}
+
+// ─── Intents ─────────────────────────────────────────────────────────────────
+
+model Intent {
+  id               String      @id @default(cuid())
+  intentId         String      @unique @map("intent_id")
+  user             String
+  srcChain         SupportedChain @map("src_chain")
+
+  // Original JSON blobs retained during expand/contract migration (#410).
+  // Do NOT remove until the follow-up contract migration is complete.
+  srcToken         Json        @map("src_token")
+  srcAmount        String      @map("src_amount")
+  dstToken         Json        @map("dst_token")
+  minDstAmount     String      @map("min_dst_amount")
+
+  // ── #410: FK columns ────────────────────────────────────────────────────────
+  // Nullable during the transition period; set by the create path once all
+  // tokens in the registry are resolvable.  The backfill migration populates
+  // these for existing rows.
+  srcTokenId       String?     @map("src_token_id")
+  dstTokenId       String?     @map("dst_token_id")
+  /// Immutable snapshot of src token decimals at intent creation time.
+  srcDecimals      Int?        @map("src_decimals")
+  /// Immutable snapshot of dst token decimals at intent creation time.
+  dstDecimals      Int?        @map("dst_decimals")
+
+  // Relations
+  srcTokenRecord   Token?      @relation("src_token", fields: [srcTokenId], references: [id])
+  dstTokenRecord   Token?      @relation("dst_token", fields: [dstTokenId], references: [id])
+
+  quotedDstAmount  String?     @map("quoted_dst_amount")
+  acceptedDstAmount String?    @map("accepted_dst_amount")
+  solver           String?
+  state            IntentState @default(open)
+  createdAt        Int         @map("created_at")
+  deadline         Int
+  filledAt         Int?        @map("filled_at")
+  fillAmount       String?     @map("fill_amount")
+  feeAmount        String?     @map("fee_amount")
+  txHash           String?     @map("tx_hash")
+  slashedAt        Int?        @map("slashed_at")
+  slashReason      String?     @map("slash_reason")
+
+  // Optimistic concurrency (#404)
+  version          Int         @default(0)
+  idempotencyKey   String?     @unique @map("idempotency_key")
+
+  // Dutch auction (#429)
+  auction          Json?
+
+  // Source-deposit verification (#403)
+  srcVerified      Boolean     @default(false) @map("src_verified")
+  srcTxHash        String?     @map("src_tx_hash")
+  srcVerification  Json?       @map("src_verification")
+
+  // Governance params snapshot at creation
+  paramsVersion    String?     @map("params_version")
+
+  // Audit log
+  auditLog         IntentAuditLog[]
 // ─── Kill-switch scopes (issue #477) ──────────────────────────────────────────
 // A switch is addressed by exactly one of four mutually-exclusive scopes.
 // `global` has no chain/token; `chain` sets chain only; `token` sets chain +
@@ -115,6 +216,33 @@ model Intent {
   @@index([user])
   @@index([state])
   @@index([solver])
+  @@index([user, createdAt(sort: Desc)], name: "intents_user_created_idx")
+  @@index([state, createdAt(sort: Desc)], name: "intents_state_created_idx")
+  // Volume-by-token index for token analytics (#410)
+  // Partial indexes are expressed in raw SQL migration (Prisma doesn't support WHERE clauses).
+  @@index([srcTokenId, createdAt(sort: Desc)], name: "intents_volume_by_token_idx")
+  @@index([dstTokenId, createdAt(sort: Desc)], name: "intents_volume_by_dst_token_idx")
+  @@map("intents")
+}
+
+// ─── Solvers ─────────────────────────────────────────────────────────────────
+
+model Solver {
+  id                  String @id @default(cuid())
+  address             String @unique
+  name                String
+  bondAmount          String @map("bond_amount")
+  fillsCompleted      Int    @default(0) @map("fills_completed")
+  fillsFailed         Int    @default(0) @map("fills_failed")
+  totalVolume         String @default("0") @map("total_volume")
+  avgFillTime         Float  @default(0) @map("avg_fill_time")
+  isActive            Boolean @default(true) @map("is_active")
+  registeredAt        Int    @map("registered_at")
+  lastActiveAt        Int    @map("last_active_at")
+  supportedChains     Json   @map("supported_chains")
+  supportedTokens     Json   @map("supported_tokens")
+  source              String? @default("api")
+  chainUpdatedLedger  Int?   @map("chain_updated_ledger")
   @@map("intents")
 }
 
@@ -156,6 +284,23 @@ model Solver {
   @@map("solvers")
 }
 
+// ─── Intent audit log ────────────────────────────────────────────────────────
+
+model IntentAuditLog {
+  id         BigInt   @id @default(autoincrement())
+  intentId   String   @map("intent_id")
+  timestamp  DateTime @default(now())
+  toState    String   @map("to_state")
+  actor      String
+  reason     String
+  metadata   Json?
+
+  intent     Intent   @relation(fields: [intentId], references: [intentId], onDelete: Cascade)
+
+  @@index([intentId])
+  @@index([intentId, timestamp(sort: Desc)])
+  @@map("intent_audit_log")
+}
 // ─── IntentAuditLog ──────────────────────────────────────────────────────────
 // Append-only record of every state transition for an intent (issue #217 / #62).
 // Queried by intentId to reconstruct the full history of a swap.
