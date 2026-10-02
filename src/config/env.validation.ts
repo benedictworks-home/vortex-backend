@@ -24,6 +24,13 @@ export const envValidationSchema = Joi.object({
     .uri({ scheme: ["postgresql", "postgres"] })
     .default("postgresql://vortex:vortex@localhost:5432/vortex?schema=public"),
 
+  // ── #411 — Read replicas ─────────────────────────────────────────────────
+  // Comma-separated Postgres connection strings for read replicas.
+  // Leave blank to route all reads to the primary.
+  DATABASE_REPLICA_URLS: Joi.string().allow("").default(""),
+  // Maximum replica replication lag (ms) before a replica is bypassed.
+  MAX_REPLICA_LAG_MS: Joi.number().integer().min(100).max(60000).default(5000),
+
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
   // Horizon base URL, used for account/balance reads (treasury, canary tooling).
@@ -90,6 +97,12 @@ export const envValidationSchema = Joi.object({
 
   WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
   REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
+
+  // ── WebSocket replay store (issue #457) ───────────────────────────────────
+  // WS_REPLAY_MAX_AGE_MS stays optional-by-omission (commented in the
+  // .env examples) and is read directly where the buffer is built.
+  WS_REPLAY_STORE: Joi.string().valid("memory", "redis").default("memory"),
+  WS_REPLAY_MAX_COUNT: Joi.number().integer().min(1).default(500),
 
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
@@ -410,6 +423,21 @@ export const envValidationSchema = Joi.object({
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
 
+  // ── #412 — Cursor HMAC secret ──────────────────────────────────────────────
+  // HMAC-SHA256 key used to sign opaque pagination cursors.
+  // Generate with: openssl rand -hex 32
+  CURSOR_HMAC_SECRET: Joi.string().allow("").default("dev-cursor-hmac-secret-do-not-use-in-prod"),
+
+  // ── #413 — Cold-storage archival ───────────────────────────────────────────
+  ARCHIVAL_ENABLED: Joi.boolean().default(false),
+  ARCHIVAL_BUCKET_NAME: Joi.string().default("vortex-archives"),
+  ARCHIVAL_S3_ENDPOINT: Joi.string().allow("").default(""),
+  ARCHIVAL_S3_REGION: Joi.string().default("us-east-1"),
+  ARCHIVAL_S3_ACCESS_KEY_ID: Joi.string().allow("").default(""),
+  ARCHIVAL_S3_SECRET_ACCESS_KEY: Joi.string().allow("").default(""),
+  ARCHIVAL_RETENTION_DAYS: Joi.number().integer().min(1).default(30),
+  ARCHIVAL_PARTITION_PREFIX: Joi.string().default("date="),
+  ARCHIVAL_MAX_ROWS_PER_FILE: Joi.number().integer().min(1000).default(100000),
   // ── Secrets Manager (issue #465) ────────────────────────────────────────────
   SECRETS_PROVIDER: Joi.string().valid("env", "aws-secrets-manager", "vault-kv").default("env"),
   SECRETS_REFRESH_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),

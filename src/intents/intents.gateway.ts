@@ -1,4 +1,4 @@
-import { OnModuleDestroy, Optional } from "@nestjs/common";
+import { Inject, OnModuleDestroy, Optional } from "@nestjs/common";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
@@ -10,6 +10,14 @@ import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-si
 import { buildMatchPredicate, IntentCapabilityIndex, SolverMatchPredicate } from "./solver-intent-matcher";
 import { IntentFeedService } from "./feed/intent-feed.service";
 import type { BackplaneHealth } from "./backplane/backplane.types";
+import type { ReplayStore } from "./backplane/replay-store";
+import { REPLAY_STORE } from "./backplane/replay-store.token";
+import {
+  negotiateProtocol,
+  resolveProtocol,
+  WS_CLOSE_REASON_UNSUPPORTED,
+  WS_CLOSE_UNSUPPORTED_PROTOCOL,
+} from "./ws-protocol";
 import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
@@ -116,7 +124,23 @@ export class EventRingBuffer {
  * Solver bots submit intents and accept/fill them through the authenticated
  * REST API. The WS gateway never accepts writes.
  */
-@WebSocketGateway({ path: "/ws" })
+@WebSocketGateway({
+  path: "/ws",
+  /**
+   * Protocol negotiation (issue #456).
+   *
+   * handleProtocols is called by the ws library during the HTTP upgrade
+   * handshake.  We always return a string (never false) so the upgrade
+   * succeeds and handleConnection can close with code 1002 for unknown
+   * versions — giving the client a descriptive WS reason string.
+   *
+   * - vortex.v1 offered   → echo "vortex.v1"
+   * - no protocol offered → echo "" (resolveProtocol treats "" as vortex.v1)
+   * - unknown protocol    → echo the first offered token; handleConnection
+   *                         then closes with 1002
+   */
+  handleProtocols: negotiateProtocol,
+})
 export class IntentsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
@@ -139,11 +163,26 @@ export class IntentsGateway
   /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
   private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
 
+  /**
+   * Sequenced replay store (issue #457).
+   *
+   * Provided by the IntentsModule via the REPLAY_STORE token (memory or
+   * Redis, selected by WS_REPLAY_STORE).  When absent — direct unit-harness
+   * construction — replay falls back to the in-process ring buffer above,
+   * which the broadcast path always keeps populated as well.
+   */
+  private readonly replayStore: ReplayStore | null;
+
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentIndex: IntentCapabilityIndex,
     @Optional() private readonly metricsService?: MetricsService,
+    /**
+     * Sequenced replay store (issue #457) — 5th positional parameter so the
+     * backplane test harnesses can inject a MemoryReplayStore directly.
+     */
+    @Optional() @Inject(REPLAY_STORE) replayStoreParam?: ReplayStore | null,
     /**
      * SSE intent feed (issues #454, #492). Injected `@Optional()` so graphs
      * that do not mount the feed — and the unit harnesses that construct this
@@ -151,6 +190,7 @@ export class IntentsGateway
      */
     @Optional() private readonly feed?: IntentFeedService,
   ) {
+    this.replayStore = replayStoreParam ?? null;
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
     this.backplane = this.createBackplane();
     if (this.backplane) {
@@ -327,6 +367,22 @@ export class IntentsGateway
       return;
     }
 
+    // Subprotocol negotiation (issue #456): resolveProtocol treats "" as the
+    // backward-compatible default vortex.v1; any other non-empty string that
+    // is not vortex.v1 was echoed back by negotiateProtocol and is rejected
+    // here with a descriptive close reason.
+    const protocolResult = resolveProtocol(
+      (client as unknown as { protocol?: string }).protocol ?? "",
+    );
+    if (!protocolResult.accepted) {
+      logger.warn(
+        `ws rejected unknown protocol="${(client as unknown as { protocol?: string }).protocol}" — closing 1002`,
+      );
+      client.close(WS_CLOSE_UNSUPPORTED_PROTOCOL, WS_CLOSE_REASON_UNSUPPORTED);
+      return;
+    }
+    const negotiatedVersion = protocolResult.version;
+
     this.subscribers.set(client, {
       chains: null,
       solver: null,
@@ -357,6 +413,7 @@ export class IntentsGateway
       JSON.stringify({
         type: "connected",
         message: "Vortex intent stream",
+        version: negotiatedVersion,
         seq: currentSeq,
       }),
     );
@@ -431,7 +488,7 @@ export class IntentsGateway
         this.handleSubscribe(client, msg);
         break;
       case "replay":
-        this.handleReplay(client, msg);
+        await this.handleReplay(client, msg);
         break;
       case "auth":
         await this.handleAuth(client, msg);
@@ -549,8 +606,15 @@ export class IntentsGateway
 
   /**
    * Process a `{ type: "replay", fromSeq: number }` message.
+   *
+   * Events are read from the injected replay store when one is wired
+   * (issue #457 — memory or Redis, survives restarts and spans replicas),
+   * otherwise from the in-process ring buffer.  Before the events are sent,
+   * the requesting connection's subscription filter (chains or solver
+   * capability predicate) is applied so replay honours the same
+   * server-side scoping as live delivery.
    */
-  private handleReplay(client: WebSocket, msg: Record<string, unknown>): void {
+  private async handleReplay(client: WebSocket, msg: Record<string, unknown>): Promise<void> {
     const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : null;
     if (fromSeq === null || !Number.isInteger(fromSeq) || fromSeq < 0) {
       logger.debug("ws replay ignored: fromSeq missing or invalid");
@@ -559,21 +623,33 @@ export class IntentsGateway
 
     if (client.readyState !== WebSocket.OPEN) return;
 
-    const oldest = this.ringBuffer.oldestSeq();
+    let events: SequencedEvent[];
+    if (this.replayStore) {
+      const result = await this.replayStore.since(fromSeq);
+      if (result.tooOld) {
+        const oldest = await this.replayStore.oldestSeq();
+        client.send(JSON.stringify({ type: "replay_too_old", fromSeq, oldestAvailableSeq: oldest }));
+        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        return;
+      }
+      events = result.events;
+    } else {
+      const oldest = this.ringBuffer.oldestSeq();
 
-    if (oldest !== -1 && fromSeq < oldest - 1) {
-      client.send(
-        JSON.stringify({
-          type: "replay_too_old",
-          fromSeq,
-          oldestAvailableSeq: oldest,
-        }),
-      );
-      logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
-      return;
+      if (oldest !== -1 && fromSeq < oldest - 1) {
+        client.send(
+          JSON.stringify({
+            type: "replay_too_old",
+            fromSeq,
+            oldestAvailableSeq: oldest,
+          }),
+        );
+        logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+        return;
+      }
+
+      events = this.ringBuffer.since(fromSeq);
     }
-
-    const events = this.ringBuffer.since(fromSeq);
 
     client.send(
       JSON.stringify({
@@ -583,8 +659,27 @@ export class IntentsGateway
       }),
     );
 
+    const filter = this.subscribers.get(client);
     for (const event of events) {
       if (client.readyState !== WebSocket.OPEN) break;
+      // Apply server-side filter (same logic as deliverToMatchingSubscribers
+      // but for this one client).
+      if (filter) {
+        if (!filter.wantAll) {
+          if (filter.solver !== null) {
+            const solverPredicate = filter.solver;
+            const inlinedIntent = (event as { intent?: unknown }).intent;
+            if (event.type === "intent_created" && inlinedIntent && typeof inlinedIntent === "object") {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              if (!solverPredicate.matches(inlinedIntent as any)) continue;
+            }
+            // state-transition events pass through
+          } else if (filter.chains !== null) {
+            const chain = this.getEventChainSync(event);
+            if (chain !== null && !filter.chains.has(chain)) continue;
+          }
+        }
+      }
       client.send(JSON.stringify(event));
     }
 
@@ -759,6 +854,15 @@ export class IntentsGateway
 
     // Push into replay buffer before sending.
     this.ringBuffer.push(sequencedEvent);
+    // Mirror into the injected replay store (issue #457) so reconnecting
+    // clients can replay across restarts/replicas.
+    if (this.replayStore) {
+      try {
+        await this.replayStore.append(sequencedEvent);
+      } catch (err) {
+        logger.warn(`replay store append failed: ${String(err)}`);
+      }
+    }
 
     logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 

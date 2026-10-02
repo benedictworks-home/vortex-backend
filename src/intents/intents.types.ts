@@ -164,6 +164,16 @@ export interface Intent {
   pendingTxHash?: string;
   /** The operation whose on-chain confirmation is being awaited. */
   pendingOp?: PendingIntentOp;
+  /**
+   * Registry token identifiers and decimals (issue #410). Populated by the
+   * create path when the token is in the registry; intentionally optional so
+   * the expand/contract migration can land without breaking the in-memory or
+   * dual-write adapters.
+   */
+  srcTokenId?: string;
+  dstTokenId?: string;
+  srcDecimals?: number;
+  dstDecimals?: number;
 }
 
 /**

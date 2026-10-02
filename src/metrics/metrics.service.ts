@@ -103,6 +103,36 @@ export class MetricsService implements OnModuleInit {
 
   // ── Solver-registry event ingestion (issue #399) ──────────────────────────
   public readonly solverRegistryEventsTotal: client.Counter<string>;
+
+  // ── Anti-griefing controls (issue #453) ──────────────────────────────────
+  /**
+   * `vortex_griefing_state_transitions_total{solver,from_state,to_state}` — counts
+   * every enforcement escalation/recovery for a solver.  Solver label is
+   * truncated to 12 chars to bound cardinality.
+   */
+  public readonly griefingStateTransitionsTotal: client.Counter<string>;
+  /**
+   * `vortex_griefing_unfilled_ratio{solver}` — current rolling unfilled/accept
+   * ratio per solver under enforcement (Gauge, updated on each unfilled event).
+   */
+  public readonly griefingUnfilledRatio: client.Gauge<string>;
+  /**
+   * `vortex_griefing_enforced_solvers` — number of solvers currently NOT in
+   * the "ok" state.
+   */
+  public readonly griefingEnforcedSolvers: client.Gauge<string>;
+  /**
+   * `vortex_griefing_enforcement_state{solver,state}` — current enforcement
+   * state as a 0/1 gauge per (solver, state) label pair.  Allows dashboards and
+   * alerts to query "how many solvers are suspended right now" with a simple
+   * `sum(vortex_griefing_enforcement_state{state="suspended"})`.
+   */
+  public readonly griefingEnforcementState: client.Gauge<string>;
+  /**
+   * `vortex_griefing_concurrency_limit{solver}` — effective concurrent-accept
+   * cap while in "reduced-concurrency" state; 0 when no limit is active.
+   */
+  public readonly griefingConcurrencyLimit: client.Gauge<string>;
   public readonly legacyStellarSignatures: client.Counter<string>;
 
   /** Dual-write / consistency-verifier metrics (issue #404). */
@@ -154,7 +184,7 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestDuration = new client.Histogram({
       name: `${prefix}http_request_duration_seconds`,
       help: "HTTP request duration in seconds",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
       registers: [this.register],
     });
@@ -162,14 +192,14 @@ export class MetricsService implements OnModuleInit {
     this.httpRequestTotal = new client.Counter({
       name: `${prefix}http_requests_total`,
       help: "Total number of HTTP requests",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 
     this.httpRequestErrors = new client.Counter({
       name: `${prefix}http_request_errors_total`,
       help: "Total number of HTTP request errors (5xx)",
-      labelNames: ["method", "route", "status_code"],
+      labelNames: ["method", "route", "status_code", "version"],
       registers: [this.register],
     });
 
@@ -286,6 +316,41 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}legacy_stellar_signatures_total`,
       help: "Accepted version 1 Stellar intent signatures during the deprecation window",
       labelNames: ["action"],
+      registers: [this.register],
+    });
+
+    // ── Anti-griefing controls (issue #453) ────────────────────────────────
+    this.griefingStateTransitionsTotal = new client.Counter({
+      name: `${prefix}griefing_state_transitions_total`,
+      help: "Anti-griefing enforcement state machine transitions per solver",
+      labelNames: ["solver", "from_state", "to_state"],
+      registers: [this.register],
+    });
+
+    this.griefingUnfilledRatio = new client.Gauge({
+      name: `${prefix}griefing_unfilled_ratio`,
+      help: "Current rolling unfilled-accept ratio for solvers under enforcement",
+      labelNames: ["solver"],
+      registers: [this.register],
+    });
+
+    this.griefingEnforcedSolvers = new client.Gauge({
+      name: `${prefix}griefing_enforced_solvers`,
+      help: "Number of solvers currently under anti-griefing enforcement (not in ok state)",
+      registers: [this.register],
+    });
+
+    this.griefingEnforcementState = new client.Gauge({
+      name: `${prefix}griefing_enforcement_state`,
+      help: "1 when the solver is currently in the given enforcement state, 0 otherwise",
+      labelNames: ["solver", "state"],
+      registers: [this.register],
+    });
+
+    this.griefingConcurrencyLimit = new client.Gauge({
+      name: `${prefix}griefing_concurrency_limit`,
+      help: "Effective concurrent-accept cap per solver while in reduced-concurrency (0 = unlimited)",
+      labelNames: ["solver"],
       registers: [this.register],
     });
 
@@ -798,5 +863,47 @@ export class MetricsService implements OnModuleInit {
 
   recordSlashTransition(toState: string, reason = "none"): void {
     this.slashTransitions.inc({ to_state: toState, reason });
+  }
+
+  // ── Anti-griefing helpers (issue #453) ────────────────────────────────────
+
+  /** Record one anti-griefing enforcement state-machine transition. */
+  recordGriefingTransition(solverAddress: string, fromState: string, toState: string): void {
+    this.griefingStateTransitionsTotal.inc({
+      solver: solverAddress.slice(0, 12),
+      from_state: fromState,
+      to_state: toState,
+    });
+  }
+
+  /** Update the rolling unfilled-accept ratio for a solver under enforcement. */
+  setGriefingRatio(solverAddress: string, ratio: number): void {
+    this.griefingUnfilledRatio.set({ solver: solverAddress.slice(0, 12) }, ratio);
+  }
+
+  /** Set the count of solvers currently under enforcement. */
+  setGriefingEnforcedCount(count: number): void {
+    this.griefingEnforcedSolvers.set(count);
+  }
+
+  /**
+   * Update per-solver enforcement state gauges.
+   *
+   * Sets the named state label to 1 and all other enforcement states to 0
+   * so dashboards can query `{state="suspended"}` without stale series.
+   */
+  setGriefingEnforcementState(solverAddress: string, state: string): void {
+    const s = solverAddress.slice(0, 12);
+    for (const st of ["ok", "cooldown", "reduced-concurrency", "suspended"]) {
+      this.griefingEnforcementState.set({ solver: s, state: st }, st === state ? 1 : 0);
+    }
+  }
+
+  /**
+   * Update the effective concurrency cap for a solver.
+   * Pass 0 when no limit is active (state is not "reduced-concurrency").
+   */
+  setGriefingConcurrencyLimit(solverAddress: string, limit: number): void {
+    this.griefingConcurrencyLimit.set({ solver: solverAddress.slice(0, 12) }, limit);
   }
 }

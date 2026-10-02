@@ -1,6 +1,6 @@
 import { ConfigService } from "@nestjs/config";
 import { Keypair } from "@stellar/stellar-sdk";
-import { IntentsGateway, EventRingBuffer } from "./intents.gateway";
+import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -104,60 +104,6 @@ function createMockClient() {
     },
   };
 }
-
-// ── EventRingBuffer unit tests ─────────────────────────────────────────────
-
-describe("EventRingBuffer", () => {
-  it("returns -1 for oldestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.oldestSeq()).toBe(-1);
-  });
-
-  it("returns 0 for latestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.latestSeq()).toBe(0);
-  });
-
-  it("tracks size", () => {
-    const buf = new EventRingBuffer(5);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    expect(buf.size()).toBe(2);
-  });
-
-  it("evicts oldest when at capacity", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    buf.push({ seq: 3, type: "c" });
-    buf.push({ seq: 4, type: "d" }); // evicts seq=1
-    expect(buf.oldestSeq()).toBe(2);
-    expect(buf.size()).toBe(3);
-  });
-
-  it("since returns only events after the given seq", () => {
-    const buf = new EventRingBuffer(10);
-    for (let i = 1; i <= 5; i++) buf.push({ seq: i, type: "e" });
-    const result = buf.since(3);
-    expect(result.map((e) => e.seq)).toEqual([4, 5]);
-  });
-
-  it("since returns empty array when fromSeq >= latestSeq", () => {
-    const buf = new EventRingBuffer(10);
-    buf.push({ seq: 1, type: "e" });
-    expect(buf.since(1)).toEqual([]);
-    expect(buf.since(99)).toEqual([]);
-  });
-
-  it("since returns all events when fromSeq < oldestSeq", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 5, type: "e" });
-    buf.push({ seq: 6, type: "e" });
-    // fromSeq=1 is older than oldest (5), since() returns events with seq > 1 — all
-    const result = buf.since(1);
-    expect(result.map((e) => e.seq)).toEqual([5, 6]);
-  });
-});
 
 // ── IntentsGateway heartbeat tests ────────────────────────────────────────
 

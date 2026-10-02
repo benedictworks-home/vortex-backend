@@ -316,6 +316,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/docs/ws": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * AsyncAPI specification for the Vortex WebSocket feed
+         * @description Returns the AsyncAPI 2.6 YAML document describing the vortex.v1 subprotocol. Use this with AsyncAPI Studio or SDK generators.
+         */
+        get: operations["WsDocsController_getSpec"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/solvers": {
         parameters: {
             query?: never;
@@ -490,6 +510,75 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["SolversController_reactivate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/griefing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List solvers currently under anti-griefing enforcement */
+        get: operations["SolverGriefingController_listEnforced"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/griefing/{address}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get anti-griefing record for a solver */
+        get: operations["SolverGriefingController_getSolverRecord"];
+        put?: never;
+        post?: never;
+        /** Reset a solver's anti-griefing state to ok */
+        delete: operations["SolverGriefingController_resetSolver"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/griefing/{address}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get anti-griefing audit log for a solver */
+        get: operations["SolverGriefingController_getSolverAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/griefing/{address}/exclude/{intentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Exclude an incident intent from griefing ratio */
+        post: operations["SolverGriefingController_excludeIncident"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1903,6 +1992,23 @@ export interface operations {
             };
         };
     };
+    WsDocsController_getSpec: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     SolversController_getLegacyLeaderboard: {
         parameters: {
             query?: never;
@@ -2196,6 +2302,100 @@ export interface operations {
                 "application/json": components["schemas"]["UpdateSolverStatusDto"];
             };
         };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolverGriefingController_listEnforced: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolverGriefingController_getSolverRecord: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolverGriefingController_resetSolver: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolverGriefingController_getSolverAudit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    SolverGriefingController_excludeIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                address: string;
+                intentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             201: {
                 headers: {

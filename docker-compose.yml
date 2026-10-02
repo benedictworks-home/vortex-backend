@@ -19,6 +19,72 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  # ── Read replica (issue #411) ─────────────────────────────────────────────
+  # Brought up with:  docker compose --profile replica up -d
+  #
+  # A streaming Postgres replica that mirrors the primary via WAL shipping.
+  # The `primary_conninfo` env var uses the Docker network hostname "postgres"
+  # to reach the primary.  DATABASE_REPLICA_URLS should be set to:
+  #   postgresql://vortex:vortex@postgres-replica:5433/vortex?schema=public
+  #
+  # NOTE: TimescaleDB images do not ship with `pg_basebackup` or the streaming
+  # replication config in the default image. This service uses stock Postgres
+  # 16 for simplicity. Use the timescaledb image in production.
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: vortex-postgres-replica
+    restart: unless-stopped
+    profiles: ["replica"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: vortex
+      POSTGRES_PASSWORD: vortex
+      POSTGRES_DB: vortex
+      # Streaming replication target
+      PGUSER: vortex
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vortex -d vortex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres-replica-data:/var/lib/postgresql/data
+    command: >
+      bash -c "
+        if [ ! -f /var/lib/postgresql/data/PG_VERSION ]; then
+          pg_basebackup -h postgres -U vortex -D /var/lib/postgresql/data -P -R --wal-method=stream;
+        fi;
+        postgres
+      "
+
+  # ── MinIO (object storage for archival, issue #413) ───────────────────────
+  # Brought up with:  docker compose --profile archival up -d
+  # Console: http://localhost:9001  (minioadmin / minioadmin)
+  # API:     http://localhost:9000
+  minio:
+    image: minio/minio:RELEASE.2024-09-22T00-33-43Z
+    container_name: vortex-minio
+    restart: unless-stopped
+    profiles: ["archival"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3-compatible API
+      - "9001:9001"   # web console
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   redis:
     image: redis:7-alpine
     container_name: vortex-redis
@@ -219,7 +285,9 @@ services:
 
 volumes:
   postgres-data:
+  postgres-replica-data:
   prometheus-data:
   grafana-data:
   loki-data:
   tempo-data:
+  minio-data:

@@ -914,6 +914,22 @@
         ]
       }
     },
+    "/docs/ws": {
+      "get": {
+        "description": "Returns the AsyncAPI 2.6 YAML document describing the vortex.v1 subprotocol. Use this with AsyncAPI Studio or SDK generators.",
+        "operationId": "WsDocsController_getSpec",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "AsyncAPI specification for the Vortex WebSocket feed",
+        "tags": [
+          "docs"
+        ]
+      }
+    },
     "/solvers": {
       "post": {
         "operationId": "SolversController_register",
@@ -1359,6 +1375,123 @@
         },
         "tags": [
           "solvers"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing": {
+      "get": {
+        "operationId": "SolverGriefingController_listEnforced",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "List solvers currently under anti-griefing enforcement",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}": {
+      "get": {
+        "operationId": "SolverGriefingController_getSolverRecord",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Get anti-griefing record for a solver",
+        "tags": [
+          "admin/griefing"
+        ]
+      },
+      "delete": {
+        "operationId": "SolverGriefingController_resetSolver",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Reset a solver's anti-griefing state to ok",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}/audit": {
+      "get": {
+        "operationId": "SolverGriefingController_getSolverAudit",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "summary": "Get anti-griefing audit log for a solver",
+        "tags": [
+          "admin/griefing"
+        ]
+      }
+    },
+    "/api/v1/admin/griefing/{address}/exclude/{intentId}": {
+      "post": {
+        "operationId": "SolverGriefingController_excludeIncident",
+        "parameters": [
+          {
+            "name": "address",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "intentId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "summary": "Exclude an incident intent from griefing ratio",
+        "tags": [
+          "admin/griefing"
         ]
       }
     },

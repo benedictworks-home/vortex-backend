@@ -49,6 +49,7 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
       intentsService,
       gateway,
       solversService,
+      null, // griefingService — @Optional(), not needed in these tests
       solverRegistry,
       metricsService,
       killSwitch,

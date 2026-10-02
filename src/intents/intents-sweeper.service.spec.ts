@@ -94,6 +94,7 @@ describe("IntentsSweeperService", () => {
       intentsService,
       gateway,
       solversService,
+      null, // griefingService — @Optional(), not needed in these tests
       solverRegistryService,
       metricsService as unknown as MetricsService,
       killSwitch as unknown as KillSwitchService,

@@ -118,6 +118,18 @@ model Intent {
   dstToken       Json        @map("dst_token")
   /// Minimum acceptable destination amount (base unit string).
   minDstAmount   String      @map("min_dst_amount")
+
+  // ── #410: FK columns ────────────────────────────────────────────────────────
+  // Nullable during the transition period; set by the create path once all
+  // tokens in the registry are resolvable.  The backfill migration populates
+  // these for existing rows.
+  srcTokenId       String?     @map("src_token_id")
+  dstTokenId       String?     @map("dst_token_id")
+  /// Immutable snapshot of src token decimals at intent creation time.
+  srcDecimals      Int?        @map("src_decimals")
+  /// Immutable snapshot of dst token decimals at intent creation time.
+  dstDecimals      Int?        @map("dst_decimals")
+
   /// Optional off-chain Dutch auction terms (issue #507).
   auction        Json?       @map("auction")
   /// Auction price locked when a solver accepts.
@@ -152,6 +164,7 @@ model Intent {
   srcTxHash      String?     @map("src_tx_hash")
   /// Last verification result: status, block, received amount, detail.
   srcVerification Json?      @map("src_verification")
+
   /// USD value of `srcAmount` at creation (issue #440); null when the price
   /// was unknown — historical rows are never backfilled.
   usdValueAtCreate Float?    @map("usd_value_at_create")
@@ -164,8 +177,15 @@ model Intent {
 
   @@index([user])
   @@index([state])
-  @@index([solver])
+  @@index([user, createdAt(sort: Desc)], name: "intents_user_created_idx")
+  @@index([state, createdAt(sort: Desc)], name: "intents_state_created_idx")
+  // Volume-by-token index for token analytics (#410).
+  // Partial variants live in raw SQL migration 20261001000000 (Prisma cannot
+  // express WHERE clauses on indexes).
+  @@index([srcTokenId, createdAt(sort: Desc)], name: "intents_volume_by_token_idx")
+  @@index([dstTokenId, createdAt(sort: Desc)], name: "intents_volume_by_dst_token_idx")
   @@map("intents")
+
 }
 
 // ─── Solver ──────────────────────────────────────────────────────────────────

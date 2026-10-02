@@ -122,6 +122,10 @@ export interface AppConfig {
   nodeEnv: string;
   port: number;
   databaseUrl: string;
+  /** Comma-separated read-replica URLs (#411). Blank = primary only. */
+  databaseReplicaUrls: string;
+  /** Maximum replica lag (ms) before a replica is bypassed (#411). */
+  maxReplicaLagMs: number;
   stellar: {
     network: "testnet" | "futurenet" | "mainnet";
     sorobanRpcUrl: string;
@@ -413,6 +417,19 @@ export interface AppConfig {
     /** Failed submissions after which the slash is cancelled and compensated. */
     maxSubmitAttempts: number;
   };
+
+  // #413 — Cold-storage archival
+  archival: {
+    enabled: boolean;
+    bucketName: string;
+    endpoint: string;
+    region: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    retentionDays: number;
+    partitionPrefix: string;
+    maxRowsPerFile: number;
+  };
 }
 
 export default (): AppConfig => ({
@@ -421,6 +438,8 @@ export default (): AppConfig => ({
   databaseUrl:
     process.env.DATABASE_URL ??
     "postgresql://vortex:vortex@localhost:5432/vortex?schema=public",
+  databaseReplicaUrls: process.env.DATABASE_REPLICA_URLS ?? "",
+  maxReplicaLagMs: parseInt(process.env.MAX_REPLICA_LAG_MS ?? "5000", 10),
   stellar: {
     network: (process.env.STELLAR_NETWORK ?? "testnet") as AppConfig["stellar"]["network"],
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
@@ -588,6 +607,18 @@ export default (): AppConfig => ({
     challengeWindowSeconds: parseInt(process.env.SLASH_CHALLENGE_WINDOW_SECONDS ?? "600", 10),
     clockSkewToleranceSeconds: parseInt(process.env.SLASH_CLOCK_SKEW_TOLERANCE_SECONDS ?? "30", 10),
     maxSubmitAttempts: parseInt(process.env.SLASH_MAX_SUBMIT_ATTEMPTS ?? "5", 10),
+  },
+
+  archival: {
+    enabled: process.env.ARCHIVAL_ENABLED === "true",
+    bucketName: process.env.ARCHIVAL_BUCKET_NAME ?? "vortex-archives",
+    endpoint: process.env.ARCHIVAL_S3_ENDPOINT ?? "",
+    region: process.env.ARCHIVAL_S3_REGION ?? "us-east-1",
+    accessKeyId: process.env.ARCHIVAL_S3_ACCESS_KEY_ID ?? "",
+    secretAccessKey: process.env.ARCHIVAL_S3_SECRET_ACCESS_KEY ?? "",
+    retentionDays: parseInt(process.env.ARCHIVAL_RETENTION_DAYS ?? "30", 10),
+    partitionPrefix: process.env.ARCHIVAL_PARTITION_PREFIX ?? "date=",
+    maxRowsPerFile: parseInt(process.env.ARCHIVAL_MAX_ROWS_PER_FILE ?? "100000", 10),
   },
 });
 
