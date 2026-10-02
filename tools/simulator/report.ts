@@ -31,7 +31,7 @@ export function formatReport(report: SimReport): string {
   const t = report.totals;
   const p = report.params;
   const lines = [
-    `Strategy:          ${report.strategy}`,
+    `Strategy:           ${report.strategy}`,
     `Params:            seed=${p.seed} feeBps=${p.feeBps} fillWindowSec=${p.fillWindowSec} minMarginBps=${p.minMarginBps} slashPenaltyUsd=${p.slashPenaltyUsd} gasUsdPerFill=${p.gasUsdPerFill}`,
     `Events:            ${num(t.events)} (${num(t.intentEvents)} intents, ${num(t.quoteRequests)} quote requests)`,
     `Quotes:            ${num(t.quotesSubmitted)} submitted, ${num(t.quotesDeclined)} declined`,

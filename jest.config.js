@@ -28,6 +28,7 @@ module.exports = {
       collectCoverageFrom: ["**/*.(t|j)s"],
       moduleNameMapper: {
         "^@nestjs/schedule$": "<rootDir>/../test/__mocks__/nestjs-schedule.ts",
+        "^@nestjs/event-emitter$": "<rootDir>/../test/__mocks__/nestjs-event-emitter.ts",
       },
     },
 

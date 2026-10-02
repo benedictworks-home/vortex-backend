@@ -33,11 +33,11 @@ describe("parseIntentEvents (issue #452)", () => {
   });
 
   it("reports the offending line for invalid JSON", () => {
-    expect(() => parseIntentEvents('{"intentId":"a"}\n{oops\n')).toThrowError(/line 2: invalid JSON/);
+    expect(() => parseIntentEvents('{"intentId":"a"}\n{oops\n')).toThrow(/line 2: invalid JSON/);
   });
 
   it("reports the missing field for incomplete rows", () => {
-    expect(() => parseIntentEvents('{"intentId":"a","deadline":20}\n')).toThrowError(/line 1: "createdAt" must be a finite number/);
+    expect(() => parseIntentEvents('{"intentId":"a","deadline":20}\n')).toThrow(/line 1: "createdAt" must be a finite number/);
   });
 });
 
@@ -54,7 +54,7 @@ describe("generateSyntheticArchive (issue #452)", () => {
   });
 
   it("rejects negative counts", () => {
-    expect(() => generateSyntheticArchive(-1, 0)).toThrowError(/non-negative integer/);
+    expect(() => generateSyntheticArchive(-1, 0)).toThrow(/non-negative integer/);
   });
 });
 
@@ -95,7 +95,7 @@ describe("parsePriceBook (issue #452)", () => {
   });
 
   it("validates required fields", () => {
-    expect(() => parsePriceBook('{"ts":1,"chain":"ethereum"}\n')).toThrowError(/"symbol" must be a non-empty string/);
+    expect(() => parsePriceBook('{"ts":1,"chain":"ethereum"}\n')).toThrow(/"symbol" must be a non-empty string/);
   });
 });
 

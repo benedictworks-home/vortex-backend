@@ -146,7 +146,7 @@ describe("report formatting (issue #452)", () => {
     const sweep = runSweep(makeEvents(), {
       strategyFactory: () => new AlwaysFillStrategy(),
       prices: makePrices(),
-      grid,
+      grid: { fillWindowSecs: [0, 100], feeBps: [5, 50] },
     });
     const table = formatSweep(sweep);
     // Header + one data row per cell (the |---| separator never starts with "| ").
