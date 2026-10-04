@@ -20,7 +20,7 @@ import { SlashingPipelineService } from "./slashing-pipeline.service";
  * solver's fill-proof challenge.
  */
 @ApiTags("slashes")
-@Controller("api/v1/slashes")
+@Controller({ path: "slashes", version: "1" })
 export class SlashesController {
   constructor(private readonly pipeline: SlashingPipelineService) {}
 
@@ -50,7 +50,7 @@ export class SlashesController {
  */
 @ApiTags("admin")
 @ApiHeader({ name: "x-admin-key", required: true })
-@Controller("api/v1/admin/slashes")
+@Controller({ path: "admin/slashes", version: "1" })
 @UseGuards(AdminGuard)
 @RequireAdminRole("admin")
 export class AdminSlashesController {

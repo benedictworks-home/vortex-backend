@@ -22,7 +22,7 @@ import { OperatorGuard, OperatorRequest } from "./operator.guard";
  */
 @ApiTags("ops/killswitch")
 @UseGuards(OperatorGuard)
-@Controller("api/v1/ops/killswitch")
+@Controller({ path: "ops/killswitch", version: "1" })
 export class KillSwitchController {
   constructor(private readonly killSwitch: KillSwitchService) {}
 

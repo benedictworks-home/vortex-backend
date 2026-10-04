@@ -24,6 +24,13 @@ export const envValidationSchema = Joi.object({
     .uri({ scheme: ["postgresql", "postgres"] })
     .default("postgresql://vortex:vortex@localhost:5432/vortex?schema=public"),
 
+  // ── #411 — Read replicas ─────────────────────────────────────────────────
+  // Comma-separated Postgres connection strings for read replicas.
+  // Leave blank to route all reads to the primary.
+  DATABASE_REPLICA_URLS: Joi.string().allow("").default(""),
+  // Maximum replica replication lag (ms) before a replica is bypassed.
+  MAX_REPLICA_LAG_MS: Joi.number().integer().min(100).max(60000).default(5000),
+
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
   // Horizon base URL, used for account/balance reads (treasury, canary tooling).
@@ -91,6 +98,12 @@ export const envValidationSchema = Joi.object({
   WS_BACKPLANE: Joi.string().valid("memory", "redis").default("memory"),
   REDIS_URL: Joi.string().uri({ scheme: ["redis", "rediss"] }).default("redis://localhost:6379"),
 
+  // ── WebSocket replay store (issue #457) ───────────────────────────────────
+  // WS_REPLAY_MAX_AGE_MS stays optional-by-omission (commented in the
+  // .env examples) and is read directly where the buffer is built.
+  WS_REPLAY_STORE: Joi.string().valid("memory", "redis").default("memory"),
+  WS_REPLAY_MAX_COUNT: Joi.number().integer().min(1).default(500),
+
   // ── Persistence adapter selection ─────────────────────────────────────────
   // Controls which repository adapter is used for intents and solvers.
   // "memory" (default) keeps everything in-process — no database required.
@@ -122,9 +135,16 @@ export const envValidationSchema = Joi.object({
   //   Authorization: Bearer <METRICS_TOKEN>
   // When empty (the default):
   //   - non-production: unauthenticated scraping allowed (local dev Prometheus)
-  //   - production: endpoint returns 401 (fail-closed — set the token before deploying)
+  //   - production: rejected at boot — #298 requires a non-empty token of at
+  //     least 16 characters so a deploy can never expose /metrics without
+  //     authentication (fail closed at validation time, not at scrape time).
   // Generate with: openssl rand -hex 32
-  METRICS_TOKEN: Joi.string().allow("").default(""),
+  METRICS_TOKEN: Joi.string()
+    .when("NODE_ENV", {
+      is: Joi.valid("production"),
+      then: Joi.string().required().invalid("").min(16),
+      otherwise: Joi.string().allow("").default(""),
+    }),
 
   // Winston log level.  Defaults to "debug" in dev/test and "info" in production.
   LOG_LEVEL: Joi.string()
@@ -360,14 +380,9 @@ export const envValidationSchema = Joi.object({
     .default(""),
 
   // ── Public anonymised datasets ────────────────────────────────────────────
-  DATASETS_ENABLED: Joi.boolean().default(false),
-  DATASETS_ANONYMIZE: Joi.boolean().default(true),
-  DATASETS_SALT: Joi.string().allow("").default(""),
-  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).max(720).default(24),
-  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).max(30).default(2),
-  DATASETS_PUBLIC_BUCKET: Joi.string().allow("").default(""),
+  // Legacy storage-backend selector (superseded by DATASETS_STORAGE below,
+  // still exported by the .env*.example files).
   DATASETS_STORAGE_KIND: Joi.string().valid("local", "memory").default("memory"),
-  DATASETS_LOCAL_DIR: Joi.string().allow("").default(""),
 
   // ── Guardian emergency ingestion (issue #507) ─────────────────────────────
   GUARDIAN_CONTRACT_ID: Joi.string().allow("").default(""),
@@ -408,6 +423,21 @@ export const envValidationSchema = Joi.object({
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
 
+  // ── #412 — Cursor HMAC secret ──────────────────────────────────────────────
+  // HMAC-SHA256 key used to sign opaque pagination cursors.
+  // Generate with: openssl rand -hex 32
+  CURSOR_HMAC_SECRET: Joi.string().allow("").default("dev-cursor-hmac-secret-do-not-use-in-prod"),
+
+  // ── #413 — Cold-storage archival ───────────────────────────────────────────
+  ARCHIVAL_ENABLED: Joi.boolean().default(false),
+  ARCHIVAL_BUCKET_NAME: Joi.string().default("vortex-archives"),
+  ARCHIVAL_S3_ENDPOINT: Joi.string().allow("").default(""),
+  ARCHIVAL_S3_REGION: Joi.string().default("us-east-1"),
+  ARCHIVAL_S3_ACCESS_KEY_ID: Joi.string().allow("").default(""),
+  ARCHIVAL_S3_SECRET_ACCESS_KEY: Joi.string().allow("").default(""),
+  ARCHIVAL_RETENTION_DAYS: Joi.number().integer().min(1).default(30),
+  ARCHIVAL_PARTITION_PREFIX: Joi.string().default("date="),
+  ARCHIVAL_MAX_ROWS_PER_FILE: Joi.number().integer().min(1000).default(100000),
   // ── Secrets Manager (issue #465) ────────────────────────────────────────────
   SECRETS_PROVIDER: Joi.string().valid("env", "aws-secrets-manager", "vault-kv").default("env"),
   SECRETS_REFRESH_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
@@ -565,4 +595,66 @@ export const envValidationSchema = Joi.object({
   SAFETY_SWEEP_INTERVAL_MS: Joi.number().integer().min(1000).default(300000),
   // Grace period for draining open WebSocket connections on shutdown.
   WS_DRAIN_TIMEOUT_MS: Joi.number().integer().min(0).default(25000),
+
+  // ── Token persistence & price feed (issues #565 #566) ─────────────────────
+  // Repository backend for the token catalogue: "memory" (default, tests and
+  // single-process dev) or "prisma" (postgres-backed, restart-surviving).
+  TOKENS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
+  // JSON object mapping token symbols to CoinGecko IDs, e.g. {"BTC":"bitcoin"}.
+  PRICE_FEED_COIN_IDS: Joi.string().default("{}"),
+  // Optional CoinGecko Pro key; empty falls back to the free-tier rate limits.
+  PRICE_FEED_API_KEY: Joi.string().allow("").default(""),
+  PRICE_FEED_REFRESH_INTERVAL_MS: Joi.number().integer().min(10_000).default(60_000),
+  // Single-tick move (%) above which the circuit breaker pauses refreshes.
+  PRICE_FEED_CIRCUIT_BREAKER_THRESHOLD_PERCENT: Joi.number().min(1).max(100).default(50),
+
+  // ── RFQ quote auction (issue #570) ────────────────────────────────────────
+  // Milliseconds solvers get to respond to a quote request before the
+  // auction window closes.
+  QUOTE_AUCTION_WINDOW_MS: Joi.number().integer().min(50).default(300),
+
+  // ── Solver reputation (issue #444) ────────────────────────────────────────
+  // Weights for each reputation sub-component. Must sum to 1 in production
+  // (fail closed if misconfigured); in dev/test the app renormalises and
+  // logs a warning so local experimentation doesn't prevent boot.
+  REP_WEIGHT_FILL_RATE: Joi.number().min(0).max(1).default(0.35),
+  REP_WEIGHT_LATENCY: Joi.number().min(0).max(1).default(0.15),
+  REP_WEIGHT_SLASHES: Joi.number().min(0).max(1).default(0.25),
+  REP_WEIGHT_QUOTE_HONOUR: Joi.number().min(0).max(1).default(0.15),
+  REP_WEIGHT_VOLUME: Joi.number().min(0).max(1).default(0.10),
+  // Shared exponential-decay half-life for all event weights.
+  // Defaults to 30 days so scores are dominated by the last ~1 month.
+  REP_DECAY_HALFLIFE_SECONDS: Joi.number()
+    .integer()
+    .min(86400)
+    .default(30 * 24 * 60 * 60),
+  // Beta-distribution priors for the fill-rate Bayesian cold-start prior.
+  // (α=4, β=1) gives a ~80% prior mean so new solvers rank above poor
+  // established performers rather than at the very bottom.
+  REP_BAYES_ALPHA: Joi.number().min(0.5).default(4),
+  REP_BAYES_BETA: Joi.number().min(0.5).default(1),
+  // Volume-component knee scale, in USD-equivalent notional.
+  // $100k default: moving from $10k → $100k of decayed volume accounts
+  // for ~0.5 of the normalised volume score.
+  REP_VOLUME_LAMBDA_USD: Joi.number().min(1).default(100000),
+  // How many trailing days of daily snapshots the /reputation endpoint
+  // returns. 1..365; default 30.
+  REP_HISTORY_WINDOW_DAYS: Joi.number().integer().min(1).max(365).default(30),
+}).custom((value, helpers) => {
+  const wSum =
+    (value.REP_WEIGHT_FILL_RATE ?? 0) +
+    (value.REP_WEIGHT_LATENCY ?? 0) +
+    (value.REP_WEIGHT_SLASHES ?? 0) +
+    (value.REP_WEIGHT_QUOTE_HONOUR ?? 0) +
+    (value.REP_WEIGHT_VOLUME ?? 0);
+  // Require exact-within-tolerance only in production. Dev/test accept any
+  // weights and let configuration.ts renormalise them.
+  if (value.NODE_ENV === "production" && Math.abs(wSum - 1) > 1e-9) {
+    return helpers.message({
+      custom:
+        `Reputation weights must sum to 1.0 in production, got ${wSum.toFixed(6)} ` +
+        "from REP_WEIGHT_{FILL_RATE,LATENCY,SLASHES,QUOTE_HONOUR,VOLUME}.",
+    });
+  }
+  return value;
 });

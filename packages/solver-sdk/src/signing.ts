@@ -51,6 +51,8 @@ export const messages = {
   accept: (intentId: string, solver: string) => `accept:${intentId}:${solver}`,
   fill: (intentId: string, solver: string) => `fill:${intentId}:${solver}`,
   cancel: (intentId: string) => `cancel:${intentId}`,
+  amend: (intentId: string, user: string, minDstAmount: string, deadline: number) =>
+    `amend:${intentId}:${user}:${minDstAmount}:${deadline}`,
   wsAuth: (solver: string, timestamp: number | string) => `solver-auth:${solver}:${String(timestamp)}`,
   register: (address: string) => `register:${address}`,
 };
@@ -108,6 +110,22 @@ export function signCancel(keypair: Keypair, intentId: string, options?: IntentS
   if (!options) return { user, signature: signMessage(keypair, messages.cancel(intentId)) };
   const context = resolveSignatureOptions(options);
   return { user, ...context, signature: signMessage(keypair, messagesV2.cancel(intentId, user, context)) };
+}
+
+/** Body for POST /api/v1/intents/{id}/amend (signed by the intent's user). */
+export function signAmend(
+  keypair: Keypair,
+  intentId: string,
+  minDstAmount: string,
+  deadline: number,
+) {
+  const user = keypair.publicKey();
+  return {
+    user,
+    minDstAmount,
+    deadline,
+    signature: signMessage(keypair, messages.amend(intentId, user, minDstAmount, deadline)),
+  };
 }
 
 /** WS `{ type: "auth" }` frame. */

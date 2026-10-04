@@ -30,11 +30,13 @@ import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Account,
+  Address,
   BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Operation,
   SorobanDataBuilder,
+  nativeToScVal,
   Networks,
   SorobanRpc,
   Transaction,
@@ -176,6 +178,11 @@ export class StellarTxService {
     private readonly signerService: SignerService,
     private readonly confirmationService: TxConfirmationService,
     configService: ConfigService<AppConfig, true>,
+    /**
+     * Emergency pause control plane (issue #477). Required: the module that
+     * owns this service runs under the global KillSwitchModule, and a missing
+     * kill switch would fail open on every write path.
+     */
     private readonly killSwitch: KillSwitchService,
     @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
@@ -622,6 +629,7 @@ export class StellarTxService {
   ): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
     const sequence = await this.resolveSimulationSequence(sourceAccount);
+    const contract = new Contract(params.contractId);
 
     // `TransactionBuilder` emits `source.sequenceNumber() + 1` as the envelope's
     // seqNum, so the account handed to it must sit one *below* the sequence the
@@ -638,32 +646,11 @@ export class StellarTxService {
       fee: baseFee,
       networkPassphrase: this.networkPassphrase,
     })
-      // Same envelope shape as `invokeContract` builds for the live path —
-      // the monitor is only useful if it simulates the call the chain would
-      // actually receive.
-      .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
+      // Contract.call encodes the invoke-host-function operation (method name
+      // as an ScSymbol, args as ScVals) exactly the way every other call site
+      // in this codebase builds one.
+      .addOperation(contract.call(params.method, ...params.args))
       .setTimebounds(now, now + this.simulationTimeoutSeconds)
-      .addOperation(
-        // The SDK expects `func` to be a fully-formed xdr.HostFunction that
-        // already carries its InvokeContractArgs; a bare enum value (and the
-        // SDK-11 style `args` array) produces an envelope that cannot be XDR
-        // encoded. The token argument mirrors the settlement contract's
-        // `native` (XLM) entry point — irrelevant to a simulation, but the
-        // ScVal must be well-formed for the envelope to decode.
-        Operation.invokeHostFunction({
-          func: xdr.HostFunction.hostFunctionTypeInvokeContract(
-            new xdr.InvokeContractArgs({
-              contractAddress: contract.toScAddress(),
-              // InvokeContractArgs takes the method name as a plain string and
-              // encodes it as a symbol itself, so no nativeToScVal here.
-              functionName: params.method,
-              args: params.args,
-            }),
-          ),
-          auth: [],
-        }),
-      )
-      .setTimeout(this.simulationTimeoutSeconds)
       .build();
   }
 

@@ -10,7 +10,7 @@ import { ProtocolParamsService, ParamsApiResponse } from "./params.service";
  * @see ProtocolParamsService
  */
 @ApiTags("governance")
-@Controller("api/v1/params")
+@Controller({ path: "params", version: "1" })
 export class ParamsController {
   constructor(private readonly paramsService: ProtocolParamsService) {}
 

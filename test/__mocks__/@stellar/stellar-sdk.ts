@@ -25,10 +25,6 @@ import * as path from "node:path";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const real: any = require(
-  // __dirname is <root>/test/__mocks__/@stellar, so the repo root is two levels
-  // up ("../..") — three levels overshoots the repo and makes `real` undefined,
-  // which surfaces far away as "Cannot read properties of undefined (reading
-  // 'Server')" inside every e2e suite that boots the Nest app.
   path.join(__dirname, "..", "..", "..", "node_modules", "@stellar", "stellar-sdk", "lib", "index.js"),
 );
 
@@ -92,6 +88,7 @@ export const Networks = real.Networks;
 export const StrKey = real.StrKey;
 export const Address = real.Address;
 export const Asset = real.Asset;
+export const Horizon = real.Horizon;
 export const Contract = real.Contract;
 export const Account = real.Account;
 export const Operation = real.Operation;
@@ -102,15 +99,6 @@ export const xdr = real.xdr;
 export const nativeToScVal = real.nativeToScVal;
 export const scValToNative = real.scValToNative;
 export const BASE_FEE = real.BASE_FEE;
-// Namespaced clients used by production code (e.g. TreasuryService builds
-// `new StellarSdk.Horizon.Server(...)`). Without these the mock leaves
-// `StellarSdk.Horizon` undefined and every e2e suite that boots the app fails.
-export const Horizon = real.Horizon;
-// SEP-10 challenge builders/verifiers (issue #442) — genuine SDK, only
-// SorobanRpc is stubbed above.
-export const WebAuth = real.WebAuth;
-export const Utils = real.Utils;
-export const Config = real.Config;
 export const MuxedAccount = real.MuxedAccount;
 export const hash = real.hash;
 export const Memo = real.Memo;
@@ -119,3 +107,8 @@ export const SorobanDataBuilder = real.SorobanDataBuilder;
 export const authorizeEntry = real.authorizeEntry;
 export const decodeAddressToScVal = real.decodeAddressToScVal;
 export const encodeAddressToScVal = real.encodeAddressToScVal;
+// SEP-10 challenge builders/verifiers (issue #442) — genuine SDK, only
+// SorobanRpc is stubbed above.
+export const WebAuth = real.WebAuth;
+export const Utils = real.Utils;
+export const Config = real.Config;

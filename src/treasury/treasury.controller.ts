@@ -24,7 +24,7 @@ import { ReconciliationSummary, ReconciliationDetailResponse } from "./treasury.
  * Public and admin endpoints for treasury reconciliation data.
  */
 @ApiTags("treasury")
-@Controller("api/v1/treasury")
+@Controller({ path: "treasury", version: "1" })
 export class TreasuryController {
   constructor(private readonly treasuryService: TreasuryService) {}
 

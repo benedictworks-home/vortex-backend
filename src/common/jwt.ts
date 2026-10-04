@@ -66,11 +66,12 @@ export function loadEd25519PrivateKey(secret: string): KeyObject | null {
     if (normalized.includes("PRIVATE KEY")) {
       return createPrivateKey(normalized);
     }
-    // Bare base64 DER (PKCS#8) — wrap it in PEM headers for Node.
+    // Bare base64 DER (PKCS#8) — decode and load directly. Re-wrapping into
+    // PEM here used to emit a stray blank line before the END header, which
+    // OpenSSL 3 rejects (`DECODER routines::unsupported`).
     const der = Buffer.from(normalized.replace(/\s+/g, ""), "base64");
     if (der.length === 0) return null;
-    const pem = `-----BEGIN PRIVATE KEY-----\n${der.toString("base64").replace(/(.{64})/g, "$1\n")}\n-----END PRIVATE KEY-----\n`;
-    return createPrivateKey(pem);
+    return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
   } catch {
     return null;
   }

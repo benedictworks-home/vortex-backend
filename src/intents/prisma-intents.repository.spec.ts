@@ -15,6 +15,25 @@ import { Intent } from "./intents.types";
 const url = process.env.TEST_DATABASE_URL;
 const describeDb = url ? describe : describe.skip;
 
+describe("PrismaIntentsRepository.amendIfOpen", () => {
+  it("guards the update by open state and the existing future deadline", async () => {
+    const updateMany = jest.fn().mockResolvedValue({ count: 0 });
+    const findUnique = jest.fn();
+    const repo = new PrismaIntentsRepository({
+      intent: { updateMany, findUnique },
+    } as unknown as PrismaService);
+
+    expect(
+      await repo.amendIfOpen("intent-1", { minDstAmount: "900", deadline: 2_000 }, 1_000),
+    ).toBeNull();
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { intentId: "intent-1", state: "open", deadline: { gt: 1_000 } },
+      data: { minDstAmount: "900", deadline: 2_000 },
+    });
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+});
+
 describeDb("PrismaIntentsRepository (Postgres)", () => {
   // Built lazily: describe.skip still evaluates this body, and PrismaClient
   // rejects an undefined URL at construction time.

@@ -41,8 +41,11 @@ export class HorizonAccountInfoLoader implements Sep10AccountInfoLoader {
 
   async load(account: string): Promise<Sep10AccountInfo> {
     const record = await new Horizon.Server(this.horizonUrl).loadAccount(account);
+    // Horizon returns `{ low, medium, high }` weights; the SDK types this as
+    // the XDR `AccountThresholds` shape, so narrow it structurally.
+    const { medium } = record.thresholds as unknown as { low: string; medium: string; high: string };
     return {
-      threshold: Math.max(1, Number(record.thresholds.medium)),
+      threshold: Math.max(1, Number(medium)),
       signers: record.signers,
     };
   }

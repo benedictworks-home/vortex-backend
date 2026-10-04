@@ -9,52 +9,31 @@ import {
 import { StrKey } from "@stellar/stellar-sdk";
 import { SorobanService } from "./soroban.service";
 import { AccountRateLimitGuard } from "./account-rate-limit.guard";
-import { ContractVersionService } from "./contract-version.service";
 
 @ApiTags("chain")
-@Controller("api/v1/chain")
+@Controller({ path: "chain", version: "1" })
 export class SorobanController {
-  constructor(
-    private readonly sorobanService: SorobanService,
-    private readonly contractVersions: ContractVersionService,
-  ) {}
+  constructor(private readonly sorobanService: SorobanService) {}
 
   @Get("health")
-  @UseGuards(AccountRateLimitGuard)
   @ApiOkResponse({
-    description:
-      "Per-endpoint health status for the Soroban RPC pool. In single-endpoint mode a " +
-      "synthetic entry is returned. Includes circuit-breaker state, error rate, p95 latency, " +
-      "and ledger lag vs. the median peer ledger.",
+    description: "Soroban RPC node health status (pass-through of the RPC `getHealth` result).",
     schema: {
       type: "object",
       properties: {
-        endpoints: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              url: { type: "string" },
-              state: { type: "string", enum: ["closed", "open", "half-open"] },
-              score: { type: "number" },
-              errorRate: { type: "number" },
-              p95LatencyMs: { type: "number" },
-              ledgerLag: { type: "number" },
-              lastSuccessAt: { type: "string", nullable: true },
-              lastErrorAt: { type: "string", nullable: true },
-              consecutiveErrors: { type: "number" },
-            },
-          },
-        },
+        status: { type: "string", example: "healthy" },
+        latestLedger: { type: "number" },
+        oldestLedger: { type: "number" },
+        ledgerRetentionWindow: { type: "number" },
       },
+      required: ["status"],
     },
   })
-  getChainHealth() {
-    return { endpoints: this.sorobanService.getEndpointHealthReport() };
+  getHealth() {
+    return this.sorobanService.getHealth();
   }
 
   @Get("ledger")
-  @UseGuards(AccountRateLimitGuard)
   @ApiOkResponse({
     description: "Latest closed ledger as reported by the Soroban RPC node.",
     schema: {
@@ -72,7 +51,6 @@ export class SorobanController {
   }
 
   @Get("network")
-  @UseGuards(AccountRateLimitGuard)
   @ApiOkResponse({
     description: "Network passphrase and protocol metadata for the configured RPC node.",
     schema: {
@@ -81,21 +59,12 @@ export class SorobanController {
         friendbotUrl: { type: "string", nullable: true },
         passphrase: { type: "string", example: "Test SDF Network ; September 2015" },
         protocolVersion: { type: "number" },
-        readOnly: {
-          type: "boolean",
-          description: "True when a configured contract runs an unsupported WASM version and writes are disabled",
-        },
-        contracts: {
-          type: "object",
-          description: "Per-contract version state (settlement, solverRegistry): status, wasmHash, abiVersion, checkedAt",
-        },
       },
-      required: ["passphrase", "readOnly", "contracts"],
+      required: ["passphrase"],
     },
   })
-  async getNetwork() {
-    const network = await this.sorobanService.getNetwork();
-    return { ...network, ...this.contractVersions.snapshot() };
+  getNetwork() {
+    return this.sorobanService.getNetwork();
   }
 
   @Get("account/:publicKey")

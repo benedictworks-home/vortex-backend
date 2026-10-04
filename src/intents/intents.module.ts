@@ -2,31 +2,23 @@ import { Module, forwardRef } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { IntentsService } from "./intents.service";
 import { IntentsController } from "./intents.controller";
-import { IntentsSseController } from "./intents-sse.controller";
 import { IntentsGateway } from "./intents.gateway";
+import { WsDocsController } from "./ws-docs.controller";
 import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
-import { backplaneProvider } from "./backplane/backplane.factory";
-import { backplaneHealthIndicator } from "./backplane/backplane-health.provider";
-import { IntentFeedService } from "./feed/intent-feed.service";
-import { Backplane, WS_BACKPLANE } from "./backplane/backplane.types";
 import { SolversModule } from "../solvers/solvers.module";
-import { SolversService } from "../solvers/solvers.service";
-import { MetricsService } from "../metrics/metrics.service";
 import { RoutingModule } from "../routing/routing.module";
 import { TokensModule } from "../tokens/tokens.module";
 import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
-import { AbuseModule } from "../abuse/abuse.module";
-import { SignatureNonceService } from "../common/signature-nonce.service";
-import { EvmSignatureVerifier } from "../common/evm-signature";
-import { AuctionTickerService } from "../auctions/auction-ticker.service";
-import { FillVerifierService } from "../soroban/fill-verifier.service";
+import { REPLAY_STORE } from "./backplane/replay-store.token";
+import { MemoryReplayStore } from "./backplane/memory-replay.store";
+import { RedisReplayStore } from "./backplane/redis-replay.store";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -42,8 +34,7 @@ import { FillVerifierService } from "../soroban/fill-verifier.service";
     forwardRef(() => SorobanModule),
     GovernanceModule,
   ],
-  controllers: [IntentsController, IntentsSseController],
-  controllers: [IntentsController],
+  controllers: [IntentsController, WsDocsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
     // INTENTS_PERSISTENCE=prisma  → PrismaIntentsRepository (production/staging)
@@ -59,42 +50,35 @@ import { FillVerifierService } from "../soroban/fill-verifier.service";
         return new InMemoryIntentsRepository();
       },
     },
-    IntentsService,
-    SignatureNonceService,
-    EvmSignatureVerifier,
-    AuctionTickerService,
-    FillVerifierService,
-    IntentCapabilityIndex,
-    backplaneProvider,
-    // IntentFeedService is provided via a factory so its optional constructor
-    // parameters are not resolved positionally by Nest's injector.
+    // Sequenced WS replay store (issue #457) — memory by default, Redis when
+    // WS_REPLAY_STORE=redis.  Injected into IntentsGateway via REPLAY_STORE.
     {
-      provide: IntentFeedService,
-      inject: [
-        IntentsService,
-        SolversService,
-        IntentCapabilityIndex,
-        { token: MetricsService, optional: true },
-        ConfigService,
-        { token: WS_BACKPLANE, optional: true },
-      ],
-      useFactory: (
-        intentsService: IntentsService,
-        solversService: SolversService,
-        intentIndex: IntentCapabilityIndex,
-        metricsService: MetricsService | undefined,
-        config: ConfigService<AppConfig, true>,
-        backplane: Backplane | undefined,
-      ) =>
-        new IntentFeedService(intentsService, solversService, intentIndex, metricsService, config, backplane),
+      provide: REPLAY_STORE,
+      useFactory: () => {
+        const store = (process.env.WS_REPLAY_STORE ?? "memory").toLowerCase();
+        const maxCount = parseInt(process.env.WS_REPLAY_MAX_COUNT ?? "500", 10);
+        const maxAgeMs = process.env.WS_REPLAY_MAX_AGE_MS
+          ? parseInt(process.env.WS_REPLAY_MAX_AGE_MS, 10)
+          : undefined;
+        if (store === "redis") {
+          return new RedisReplayStore({
+            redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+            streamKey: "vortex:intents:replay",
+            maxCount,
+            maxAgeMs,
+          });
+        }
+        return new MemoryReplayStore({ maxCount, maxAgeMs });
+      },
     },
+    IntentsService,
+    IntentCapabilityIndex,
     IntentsGateway,
-    backplaneHealthIndicator,
     IntentsSweeperService,
     IntentsMaintenanceJobs,
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.
   ],
-  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex, IntentFeedService],
+  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex, REPLAY_STORE],
 })
 export class IntentsModule {}

@@ -3,23 +3,13 @@ import { ApiOperation, ApiTags } from "@nestjs/swagger";
 import { StatsService } from "./stats.service";
 
 @ApiTags("stats")
-@Controller("api/v1/stats")
+@Controller({ path: "stats", version: "1" })
 export class StatsController {
   constructor(private readonly statsService: StatsService) {}
 
   @Get()
   getStats() {
     return this.statsService.getProtocolStats();
-  }
-
-  @Get("public")
-  getPublicStats() {
-    return this.statsService.getPublicStats();
-  }
-
-  @Get("public/history")
-  getPublicStatsHistory() {
-    return this.statsService.getPublicStatsHistory();
   }
 
   @Get("treasury")

@@ -17,6 +17,12 @@ import { IntentsSweeperService } from "./intents/intents-sweeper.service";
 import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "./config/limits.config";
 import { JobsService } from "./jobs/jobs.service";
 import { adminAuthMiddleware } from "./admin/admin.guard";
+import {
+  API_VERSIONS,
+  createApiDeprecationHeadersMiddleware,
+  enableApiVersioning,
+  openApiDocumentForVersion,
+} from "./common/api-versioning";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -66,6 +72,7 @@ function checkContractIdEnvVars(
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  enableApiVersioning(app);
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
   // forwarded protocol when TLS terminates upstream behind nginx/ALB.
@@ -116,6 +123,7 @@ async function bootstrap() {
 
     next();
   });
+  app.use(createApiDeprecationHeadersMiddleware());
 
   // Issue #43 / #302 — verify the security headers we rely on in production.
   // HSTS is explicitly configured so it is not silently skipped when a TLS
@@ -176,11 +184,19 @@ async function bootstrap() {
     .setDescription("Intent relay API + WebSocket feed for Vortex Protocol")
     .setVersion("0.1.0")
     .build();
-  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  const allVersionsDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  const swaggerDocuments = Object.fromEntries(
+    API_VERSIONS.map((version) => [version, openApiDocumentForVersion(allVersionsDocument, version)]),
+  );
 
   const shouldServeSwagger = process.env.NODE_ENV !== "production";
   if (shouldServeSwagger) {
-    SwaggerModule.setup("docs", app, swaggerDocument);
+    SwaggerModule.setup("docs", app, swaggerDocuments["1"]);
+    for (const version of API_VERSIONS) {
+      SwaggerModule.setup(`docs/v${version}`, app, swaggerDocuments[version], {
+        jsonDocumentUrl: `docs/v${version}-json`,
+      });
+    }
   }
 
   const configService = app.get(ConfigService<AppConfig, true>);

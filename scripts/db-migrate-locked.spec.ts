@@ -13,7 +13,7 @@
  * `require` and typed here instead of via an ES import (no allowJs in
  * tsconfig, and the runtime must not depend on generated types).
  */
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const migrate = require("./db-migrate-locked.js") as {
   CHECKPOINT_DDL: string;
   CHECKPOINT_TABLE: string;

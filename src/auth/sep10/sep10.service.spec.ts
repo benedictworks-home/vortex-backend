@@ -8,7 +8,7 @@
 import { BadRequestException } from "@nestjs/common";
 import type { ConfigService } from "@nestjs/config";
 import { Keypair, Transaction, WebAuth } from "@stellar/stellar-sdk";
-import { generateKeyPairSync, createPublicKey } from "node:crypto";
+import { generateKeyPairSync, createPublicKey, type KeyObject } from "node:crypto";
 import { NETWORK_PASSPHRASES, type AppConfig } from "../../config/configuration";
 import { loadEd25519PrivateKey, signEddsaJwt, signHs256Jwt, verifyEddsaJwt } from "../../common/jwt";
 import type { SolversService } from "../../solvers/solvers.service";

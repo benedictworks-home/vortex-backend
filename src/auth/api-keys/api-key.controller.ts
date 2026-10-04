@@ -28,7 +28,7 @@ import { RotateApiKeyDto } from "./dto/rotate-api-key.dto";
  * creation/rotation and is never persisted or logged.
  */
 @ApiTags("admin")
-@Controller("api/v1/admin/api-keys")
+@Controller({ path: "admin/api-keys", version: "1" })
 @UseGuards(AdminGuard)
 @RequireAdminRole("admin")
 export class ApiKeyController {
