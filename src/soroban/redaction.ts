@@ -18,7 +18,7 @@ const SENSITIVE_KEY_PATTERNS = [
   // AWS secret access key
   /AKIA[0-9A-Z]{16}/g,
   // Generic password/secret in URL
-  /:\/\/[^:\/\s]+:([^@\/\s]{8,})@/gi,
+  /:\/\/[^:/\s]+:([^@/\s]{8,})@/gi,
   // Database connection strings with passwords
   /postgresql:\/\/[^:]+:([^@]+)@/gi,
   /mysql:\/\/[^:]+:([^@]+)@/gi,

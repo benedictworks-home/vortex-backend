@@ -43,7 +43,7 @@ export class ShadowReportQueryDto {
  * describes internal consistency is not something to expose publicly.
  */
 @ApiTags("admin")
-@Controller("api/v1/admin")
+@Controller({ path: "admin", version: "1" })
 export class ShadowController {
   constructor(private readonly shadowService: ShadowService) {}
 

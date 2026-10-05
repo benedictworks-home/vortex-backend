@@ -100,6 +100,12 @@ jobs:
 
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
+      # Issue #491 — QEMU for arm64 cross-compilation in the build job.
+      - name: Set up QEMU (arm64 cross-build)
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff9c9f7eb5ca85ccdb5 # v3.6.0
+        with:
+          platforms: linux/arm64
+
       - name: Resolve the image reference
         id: ref
         run: echo "image=${REGISTRY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
@@ -115,18 +121,24 @@ jobs:
       # for the SBOM, the signature, both attestations, and every deploy step
       # downstream — so "we deployed what we signed" is true by construction
       # rather than by convention.
-      - name: Build and push the image
+      # Issue #491 — Multi-arch distroless build with registry cache.
+      - name: Build and push the image (multi-arch, distroless)
         id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
           sbom: false
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          build-args: |
+            NODE_VERSION=20
+            DISTROLESS_TAG=nodejs20-debian12
       - name: Fail early if the push produced no digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -938,3 +950,4 @@ jobs:
           set -euo pipefail
           docker pull "$IMAGE"
           docker tag "$IMAGE" vortex-backend:production
+

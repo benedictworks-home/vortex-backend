@@ -4,7 +4,7 @@ import { TokensService } from "./tokens.service";
 import { StellarTokensResponseDto } from "./dto/token-response.dto";
 
 @ApiTags("tokens")
-@Controller("api/v1/tokens")
+@Controller({ path: "tokens", version: "1" })
 export class TokensController {
   constructor(private readonly tokensService: TokensService) {}
 

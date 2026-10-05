@@ -70,7 +70,20 @@ export function verifyStellarSignature(
  */
 export function buildCancelMessage(intentId: string, context?: IntentSignatureContext, user?: string): string {
   if (context) return buildV2IntentMessage(context, "cancel", intentId, { user: user ?? "" });
+
   return `cancel:${intentId}`;
+}
+
+/**
+ * Build the canonical message that an intent owner must sign to amend it.
+ */
+export function buildAmendMessage(
+  intentId: string,
+  user: string,
+  minDstAmount: string,
+  deadline: number,
+): string {
+  return `amend:${intentId}:${user}:${minDstAmount}:${deadline}`;
 }
 
 /**
@@ -95,6 +108,7 @@ export function buildHeartbeatMessage(address: string, timestamp: number | strin
  */
 export function buildAcceptMessage(intentId: string, solver: string, context?: IntentSignatureContext): string {
   if (context) return buildV2IntentMessage(context, "accept", intentId, { solver });
+
   return `accept:${intentId}:${solver}`;
 }
 
@@ -122,6 +136,14 @@ export function buildFillMessage(
  */
 export function buildRegisterMessage(address: string): string {
   return `register:${address}`;
+}
+
+/**
+ * Canonical message a solver signs to prove a fill landed in time and cancel
+ * a pending slash during its challenge window (issue #397).
+ */
+export function buildFillProofMessage(intentId: string, solver: string, txHash: string): string {
+  return `fill-proof:${intentId}:${solver}:${txHash}`;
 }
 
 /**
@@ -163,12 +185,4 @@ export function buildDisputeReviewMessage(disputeId: string): string {
  */
 export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
   return `dispute-decision:${disputeId}:${resolution}:${reason}`;
-}
-
-/**
- * Canonical message a solver signs to prove a fill landed in time and cancel
- * a pending slash during its challenge window (issue #397).
- */
-export function buildFillProofMessage(intentId: string, solver: string, txHash: string): string {
-  return `fill-proof:${intentId}:${solver}:${txHash}`;
 }

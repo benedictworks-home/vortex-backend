@@ -67,7 +67,10 @@ export class SolverLivenessService implements OnModuleInit, OnModuleDestroy {
     private readonly solvers: SolversService,
     private readonly config: ConfigService<AppConfig, true>,
     @Inject(SOLVERS_LIVENESS_STORE) private readonly store: LivenessStore,
-    private readonly feed: IntentFeedService,
+    // Optional exactly like the gateway's feed param: the current IntentsModule
+    // does not register an IntentFeedService provider, so graphs that don't
+    // mount one still resolve (status events are then skipped, not fatal).
+    @Optional() private readonly feed?: IntentFeedService,
     @Optional() private readonly metrics?: MetricsService,
   ) {}
 
@@ -175,7 +178,11 @@ export class SolverLivenessService implements OnModuleInit, OnModuleDestroy {
       // is proof of life: the solver gets its full window to connect and
       // beat before being excluded from RFQ/routing.
       for (const verdict of verdicts) {
-        this.live.set(verdict.solver.address, verdict.live);
+        // Boot grace keeps the optimistic "live" default: bots have not had
+        // their window to connect and beat yet, so a missing shared verdict
+        // must not read as dead (metrics refresh + predicate gating stay
+        // permissive until grace expires).
+        this.live.set(verdict.solver.address, inGrace || verdict.live);
         if (verdict.live || inGrace) continue;
         const proofOfLife = now - verdict.solver.lastActiveAt * 1000 < this.offlineWindowMs;
         if (!proofOfLife) {
@@ -255,7 +262,7 @@ export class SolverLivenessService implements OnModuleInit, OnModuleDestroy {
     reason: string,
   ): Promise<void> {
     try {
-      await this.feed.broadcast({
+      await this.feed?.broadcast({
         type: "solver_status_changed",
         solver: address,
         status,

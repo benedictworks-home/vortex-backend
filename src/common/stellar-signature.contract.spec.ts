@@ -3,7 +3,6 @@ import {
   buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
-  buildHighSlippageAckMessage,
   buildRegisterMessage,
   buildSolverStatusMessage,
   verifyStellarSignature,
@@ -20,11 +19,6 @@ const messageBuilders: Array<{ name: string; builder: (...args: any[]) => string
     name: "buildSolverStatusMessage",
     builder: buildSolverStatusMessage,
     args: ["deactivate", VALID_PUBLIC_KEY],
-  },
-  {
-    name: "buildHighSlippageAckMessage",
-    builder: buildHighSlippageAckMessage,
-    args: [VALID_PUBLIC_KEY, "1000000", "5000000"],
   },
 ];
 

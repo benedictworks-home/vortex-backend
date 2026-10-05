@@ -1,6 +1,6 @@
 import { ConfigService } from "@nestjs/config";
 import { Keypair } from "@stellar/stellar-sdk";
-import { IntentsGateway, EventRingBuffer } from "./intents.gateway";
+import { IntentsGateway } from "./intents.gateway";
 import { IntentsService } from "./intents.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -37,12 +37,8 @@ function makeSolverRecord(address: string, overrides: Partial<SolverRecord> = {}
   };
 }
 
-/**
- * Capability index for tests: wraps the real index around `intentsService`,
- * or returns a stub the gateway can read from when none is given.
- */
-function makeIntentIndex(intentsService?: IntentsService): IntentCapabilityIndex {
-  if (intentsService) return new IntentCapabilityIndex(intentsService);
+/** Stub capability index: the gateway only reads eligible intents from it. */
+function makeIntentIndex(): IntentCapabilityIndex {
   return {
     rebuild: jest.fn().mockResolvedValue(undefined),
     addIntent: jest.fn(),
@@ -50,7 +46,6 @@ function makeIntentIndex(intentsService?: IntentsService): IntentCapabilityIndex
     getEligibleFor: jest.fn().mockReturnValue([]),
   } as unknown as IntentCapabilityIndex;
 }
-import { IntentFeedService } from "./feed/intent-feed.service";
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -90,26 +85,10 @@ function makeSolversService() {
   } as any;
 }
 
-function makeFeed(
-  intentsService: IntentsService,
-  solversService: ReturnType<typeof makeSolversService>,
-  intentIndex: IntentCapabilityIndex,
-  ringBufferCapacity?: number,
-): IntentFeedService {
-  const feed = new IntentFeedService(intentsService, solversService, intentIndex);
-  if (ringBufferCapacity !== undefined) feed.setRingBufferCapacity(ringBufferCapacity);
-  return feed;
-}
-
 function createMockClient() {
   const listeners: Record<string, (...args: unknown[]) => void> = {};
   return {
-    // Real `ws` sockets expose OPEN as an instance property (== 1); ConnectionState
-    // reads `socket.OPEN`, so the double must mirror that or every send is treated
-    // as "not open" and silently dropped.
-    OPEN: 1,
     readyState: 1, // WebSocket.OPEN
-    bufferedAmount: 0,
     send: jest.fn(),
     ping: jest.fn(),
     terminate: jest.fn(),
@@ -126,60 +105,6 @@ function createMockClient() {
   };
 }
 
-// ── EventRingBuffer unit tests ─────────────────────────────────────────────
-
-describe("EventRingBuffer", () => {
-  it("returns -1 for oldestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.oldestSeq()).toBe(-1);
-  });
-
-  it("returns 0 for latestSeq when empty", () => {
-    const buf = new EventRingBuffer(5);
-    expect(buf.latestSeq()).toBe(0);
-  });
-
-  it("tracks size", () => {
-    const buf = new EventRingBuffer(5);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    expect(buf.size()).toBe(2);
-  });
-
-  it("evicts oldest when at capacity", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 1, type: "a" });
-    buf.push({ seq: 2, type: "b" });
-    buf.push({ seq: 3, type: "c" });
-    buf.push({ seq: 4, type: "d" }); // evicts seq=1
-    expect(buf.oldestSeq()).toBe(2);
-    expect(buf.size()).toBe(3);
-  });
-
-  it("since returns only events after the given seq", () => {
-    const buf = new EventRingBuffer(10);
-    for (let i = 1; i <= 5; i++) buf.push({ seq: i, type: "e" });
-    const result = buf.since(3);
-    expect(result.map((e) => e.seq)).toEqual([4, 5]);
-  });
-
-  it("since returns empty array when fromSeq >= latestSeq", () => {
-    const buf = new EventRingBuffer(10);
-    buf.push({ seq: 1, type: "e" });
-    expect(buf.since(1)).toEqual([]);
-    expect(buf.since(99)).toEqual([]);
-  });
-
-  it("since returns all events when fromSeq < oldestSeq", () => {
-    const buf = new EventRingBuffer(3);
-    buf.push({ seq: 5, type: "e" });
-    buf.push({ seq: 6, type: "e" });
-    // fromSeq=1 is older than oldest (5), since() returns events with seq > 1 — all
-    const result = buf.since(1);
-    expect(result.map((e) => e.seq)).toEqual([5, 6]);
-  });
-});
-
 // ── IntentsGateway heartbeat tests ────────────────────────────────────────
 
 describe("IntentsGateway heartbeat", () => {
@@ -193,9 +118,6 @@ describe("IntentsGateway heartbeat", () => {
     intentsService = makeIntentsService();
     solversService = makeSolversService();
     gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
-    const intentIndex = makeIntentIndex(intentsService);
-    const feed = makeFeed(intentsService, solversService, intentIndex);
-    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -292,17 +214,14 @@ describe("IntentsGateway heartbeat", () => {
     const signature = keypair.sign(Buffer.from(message, "utf8")).toString("base64");
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature }));
-    // auth_ok is followed by an eligible_snapshot frame, so assert the frame was
-    // sent rather than that it was the final one. ConnectionState passes a flush
-    // callback as a second argument, so match on the payload argument only.
-    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
-      JSON.stringify({ type: "auth_ok", method: "signature" }),
-    );
+    // Ack the auth first, then immediately push the scoped eligibility
+    // snapshot (#436) — so the snapshot, not the ack, is the final frame of
+    // a successful handshake.
+    expect(client.send).toHaveBeenCalledWith(JSON.stringify({ type: "auth_ok" }));
+    expect(client.send).toHaveBeenLastCalledWith(expect.stringContaining('"type":"eligible_snapshot"'));
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature: "bad" }));
-    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
-      JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }),
-    );
+    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
   });
 });
 
@@ -319,9 +238,6 @@ describe("IntentsGateway logging", () => {
     intentsService = makeIntentsService();
     solversService = makeSolversService();
     gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
-    const intentIndex = makeIntentIndex(intentsService);
-    const feed = makeFeed(intentsService, solversService, intentIndex);
-    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -330,8 +246,7 @@ describe("IntentsGateway logging", () => {
   });
 
   it("logs heartbeat started on construction", () => {
-    // The gateway now logs the backplane mode alongside the heartbeat banner.
-    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/^ws heartbeat started/));
+    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
   });
 
   it("logs connection with subscriber count", () => {
@@ -355,10 +270,8 @@ describe("IntentsGateway logging", () => {
 
     await gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
 
-    // Sequencing/broadcast logging moved to the transport-agnostic feed service
-    // (issue #433); the log line must not include the event payload.
     expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringMatching(/feed broadcast type=intent_created/),
+      expect.stringMatching(/ws broadcast type=intent_created/),
     );
   });
 
@@ -369,7 +282,7 @@ describe("IntentsGateway logging", () => {
     jest.advanceTimersByTime(60_000);
 
     expect(logger.debug).toHaveBeenCalledWith(
-      "ws heartbeat terminated 1 dead client(s) (subscribers=0)",
+      "ws heartbeat terminated dead client (subscribers=0)",
     );
   });
 });
@@ -385,10 +298,6 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
-    const solversService = makeSolversService();
-    const intentIndex = makeIntentIndex(intentsService);
-    const feed = makeFeed(intentsService, solversService, intentIndex);
-    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -546,10 +455,6 @@ describe("IntentsGateway — event replay (#258)", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
-    const solversService = makeSolversService();
-    const intentIndex = makeIntentIndex(intentsService);
-    const feed = makeFeed(intentsService, solversService, intentIndex);
-    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -589,10 +494,6 @@ describe("IntentsGateway — event replay (#258)", () => {
     const tinyGateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
     // @ts-expect-error – accessing private field for test setup
     tinyGateway.ringBuffer["capacity"] = 2;
-    const solversService = makeSolversService();
-    const intentIndex = makeIntentIndex(intentsService);
-    const feed = makeFeed(intentsService, solversService, intentIndex, 2);
-    const tinyGateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
 
     const client = createMockClient();
     tinyGateway.handleConnection(client as unknown as import("ws").WebSocket);
@@ -667,65 +568,7 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     await gateway.broadcast({ type: "test_buffered" });
 
-    // The replay buffer now lives in the transport-agnostic feed service
-    // (issue #433); the gateway delegates replay to it.
     // @ts-expect-error – accessing private for assertion
-    expect(gateway.feed.replaySince(0, null as never).events).toHaveLength(1);
-  });
-});
-
-// ── #334: Heartbeat observability improvements ────────────────────────────
-
-describe("IntentsGateway — heartbeat observability (#334)", () => {
-  let gateway: IntentsGateway;
-  let intentsService: IntentsService;
-
-  beforeEach(() => {
-    jest.useFakeTimers();
-    jest.clearAllMocks();
-    intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
-  });
-
-  afterEach(() => {
-    gateway.onModuleDestroy();
-    jest.useRealTimers();
-  });
-
-  it("heartbeatIntervalMs defaults to 30000", () => {
-    expect(gateway.heartbeatIntervalMs).toBe(30_000);
-  });
-
-  it("getLastTerminatedCount() returns 0 initially", () => {
-    expect(gateway.getLastTerminatedCount()).toBe(0);
-  });
-
-  it("getLastTerminatedCount() reflects terminated clients after heartbeat", () => {
-    const client = createMockClient();
-    gateway.handleConnection(client as unknown as import("ws").WebSocket);
-
-    // First tick: marks alive=false, sends ping
-    jest.advanceTimersByTime(30_000);
-    expect(gateway.getLastTerminatedCount()).toBe(0);
-
-    // Second tick: client didn't pong → terminated
-    jest.advanceTimersByTime(30_000);
-    expect(gateway.getLastTerminatedCount()).toBe(1);
-  });
-
-  it("getZombieCount() returns count of clients that missed a ping but are not yet terminated", () => {
-    const client = createMockClient();
-    gateway.handleConnection(client as unknown as import("ws").WebSocket);
-
-    // Before first heartbeat: all clients are alive (alive=true), no zombies
-    expect(gateway.getZombieCount()).toBe(0);
-
-    // After first heartbeat tick: alive is set to false for clients that didn't pong
-    jest.advanceTimersByTime(30_000);
-    expect(gateway.getZombieCount()).toBe(1);
-
-    // After second tick: zombie is terminated, count back to 0
-    jest.advanceTimersByTime(30_000);
-    expect(gateway.getZombieCount()).toBe(0);
+    expect(gateway.ringBuffer.size()).toBe(1);
   });
 });

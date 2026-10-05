@@ -1,0 +1,515 @@
+asyncapi: "2.6.0"
+
+info:
+  title: Vortex Intent Feed
+  version: "1.0.0"
+  description: |
+    Real-time WebSocket feed for the Vortex cross-chain intent protocol.
+
+    Clients connect to `ws://<host>/ws` and optionally negotiate the
+    `vortex.v1` subprotocol via the `Sec-WebSocket-Protocol` header.
+
+    ## Protocol versioning
+
+    | Scenario | Behaviour |
+    |---|---|
+    | `Sec-WebSocket-Protocol: vortex.v1` | Accepted; server echoes `vortex.v1` |
+    | No `Sec-WebSocket-Protocol` header | Accepted; defaults to `vortex.v1` |
+    | Unknown subprotocol | Connection closed with code 1002 |
+
+    ## Message flow
+
+    1. Server → client: `connected` (seq cursor)
+    2. Server → client: `snapshot` (up to 20 open intents)
+    3. Client → server: `subscribe` (optional chain filter) or `auth` (solver)
+    4. Server → client: `subscribed` or `auth_ok` / `auth_error`
+    5. Server → client: live events (`intent_created`, `intent_accepted`, …)
+    6. Client → server: `replay` to catch up after a disconnect
+
+  contact:
+    name: Vortex Protocol
+    url: https://github.com/stellar-vortex-protocol/vortex-backend
+
+servers:
+  production:
+    url: wss://api.vortex.finance/ws
+    protocol: wss
+    description: Production intent feed
+    security:
+      - {}
+  local:
+    url: ws://localhost:4000/ws
+    protocol: ws
+    description: Local development
+
+channels:
+  /:
+    description: The single multiplexed intent-feed channel.
+    subscribe:
+      operationId: receiveEvent
+      summary: Receive intent lifecycle events and control frames
+      message:
+        oneOf:
+          - $ref: "#/components/messages/connected"
+          - $ref: "#/components/messages/snapshot"
+          - $ref: "#/components/messages/eligible_snapshot"
+          - $ref: "#/components/messages/subscribed"
+          - $ref: "#/components/messages/subscribe_rejected"
+          - $ref: "#/components/messages/auth_ok"
+          - $ref: "#/components/messages/auth_error"
+          - $ref: "#/components/messages/intent_created"
+          - $ref: "#/components/messages/intent_accepted"
+          - $ref: "#/components/messages/intent_filled"
+          - $ref: "#/components/messages/intent_cancelled"
+          - $ref: "#/components/messages/intent_expired"
+          - $ref: "#/components/messages/intent_slashed"
+          - $ref: "#/components/messages/replay_start"
+          - $ref: "#/components/messages/replay_end"
+          - $ref: "#/components/messages/replay_too_old"
+
+    publish:
+      operationId: sendCommand
+      summary: Send control commands to the server
+      message:
+        oneOf:
+          - $ref: "#/components/messages/subscribe_cmd"
+          - $ref: "#/components/messages/auth_cmd"
+          - $ref: "#/components/messages/replay_cmd"
+
+components:
+  messages:
+    # ── Server → client ────────────────────────────────────────────────────
+
+    connected:
+      name: connected
+      title: Connection established
+      summary: Sent immediately on connect with the current sequence cursor.
+      payload:
+        $ref: "#/components/schemas/ConnectedFrame"
+
+    snapshot:
+      name: snapshot
+      title: Open intents snapshot
+      summary: Up to 20 currently-open intents sent on connect.
+      payload:
+        $ref: "#/components/schemas/SnapshotFrame"
+
+    eligible_snapshot:
+      name: eligible_snapshot
+      title: Solver-eligible intents snapshot
+      summary: Sent after a successful `auth` with intents matching the solver's capabilities.
+      payload:
+        $ref: "#/components/schemas/EligibleSnapshotFrame"
+
+    subscribed:
+      name: subscribed
+      title: Subscription confirmed
+      summary: Echoes the active filter after a `subscribe` command.
+      payload:
+        $ref: "#/components/schemas/SubscribedFrame"
+
+    subscribe_rejected:
+      name: subscribe_rejected
+      title: Subscription rejected
+      summary: Sent when a subscribe command exceeds a per-connection limit.
+      payload:
+        $ref: "#/components/schemas/SubscribeRejectedFrame"
+
+    auth_ok:
+      name: auth_ok
+      title: Authentication successful
+      payload:
+        $ref: "#/components/schemas/AuthOkFrame"
+
+    auth_error:
+      name: auth_error
+      title: Authentication failed
+      payload:
+        $ref: "#/components/schemas/AuthErrorFrame"
+
+    intent_created:
+      name: intent_created
+      title: New intent created
+      summary: Broadcast when a user submits a new intent.
+      payload:
+        $ref: "#/components/schemas/IntentCreatedFrame"
+
+    intent_accepted:
+      name: intent_accepted
+      title: Intent accepted by a solver
+      payload:
+        $ref: "#/components/schemas/IntentAcceptedFrame"
+
+    intent_filled:
+      name: intent_filled
+      title: Intent filled by a solver
+      payload:
+        $ref: "#/components/schemas/IntentFilledFrame"
+
+    intent_cancelled:
+      name: intent_cancelled
+      title: Intent cancelled by the user
+      payload:
+        $ref: "#/components/schemas/IntentCancelledFrame"
+
+    intent_expired:
+      name: intent_expired
+      title: Intent expired (deadline passed without a fill)
+      payload:
+        $ref: "#/components/schemas/IntentExpiredFrame"
+
+    intent_slashed:
+      name: intent_slashed
+      title: Intent slashed (solver missed fill deadline)
+      payload:
+        $ref: "#/components/schemas/IntentSlashedFrame"
+
+    replay_start:
+      name: replay_start
+      title: Replay sequence starting
+      payload:
+        $ref: "#/components/schemas/ReplayStartFrame"
+
+    replay_end:
+      name: replay_end
+      title: Replay sequence complete
+      payload:
+        $ref: "#/components/schemas/ReplayEndFrame"
+
+    replay_too_old:
+      name: replay_too_old
+      title: Requested replay seq has been evicted
+      payload:
+        $ref: "#/components/schemas/ReplayTooOldFrame"
+
+    # ── Client → server ────────────────────────────────────────────────────
+
+    subscribe_cmd:
+      name: subscribe
+      title: Subscribe to a chain filter
+      payload:
+        $ref: "#/components/schemas/SubscribeCommand"
+
+    auth_cmd:
+      name: auth
+      title: Authenticate as a registered solver
+      payload:
+        $ref: "#/components/schemas/AuthCommand"
+
+    replay_cmd:
+      name: replay
+      title: Replay missed events from a sequence number
+      payload:
+        $ref: "#/components/schemas/ReplayCommand"
+
+  schemas:
+    # ── Shared ──────────────────────────────────────────────────────────────
+
+    SeqField:
+      type: integer
+      minimum: 0
+      description: Monotonically increasing sequence number assigned by the server.
+
+    IntentId:
+      type: string
+      format: uuid
+
+    SolverAddress:
+      type: string
+      description: Stellar public key (G…) of the solver.
+
+    # ── Server → client frames ──────────────────────────────────────────────
+
+    ConnectedFrame:
+      type: object
+      required: [type, message, seq]
+      properties:
+        type:
+          type: string
+          const: connected
+        message:
+          type: string
+          example: "Vortex intent stream"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+        version:
+          type: string
+          description: Negotiated protocol version.
+          example: "vortex.v1"
+
+    SnapshotFrame:
+      type: object
+      required: [type, intents, seq]
+      properties:
+        type:
+          type: string
+          const: snapshot
+        intents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Intent"
+          maxItems: 20
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    EligibleSnapshotFrame:
+      type: object
+      required: [type, intents, count]
+      properties:
+        type:
+          type: string
+          const: eligible_snapshot
+        intents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Intent"
+        count:
+          type: integer
+
+    SubscribedFrame:
+      type: object
+      required: [type, filter]
+      properties:
+        type:
+          type: string
+          const: subscribed
+        filter:
+          type: object
+          properties:
+            chains:
+              type: array
+              items:
+                type: string
+            all:
+              type: boolean
+
+    SubscribeRejectedFrame:
+      type: object
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          const: subscribe_rejected
+        reason:
+          type: string
+
+    AuthOkFrame:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: auth_ok
+
+    AuthErrorFrame:
+      type: object
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          const: auth_error
+        reason:
+          type: string
+
+    IntentCreatedFrame:
+      type: object
+      required: [type, intent, seq]
+      properties:
+        type:
+          type: string
+          const: intent_created
+        intent:
+          $ref: "#/components/schemas/Intent"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentAcceptedFrame:
+      type: object
+      required: [type, intentId, solver, seq]
+      properties:
+        type:
+          type: string
+          const: intent_accepted
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentFilledFrame:
+      type: object
+      required: [type, intentId, solver, fillAmount, seq]
+      properties:
+        type:
+          type: string
+          const: intent_filled
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        fillAmount:
+          type: string
+          description: Fill amount in destination token base units.
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentCancelledFrame:
+      type: object
+      required: [type, intentId, seq]
+      properties:
+        type:
+          type: string
+          const: intent_cancelled
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentExpiredFrame:
+      type: object
+      required: [type, intentId, seq]
+      properties:
+        type:
+          type: string
+          const: intent_expired
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    IntentSlashedFrame:
+      type: object
+      required: [type, intentId, seq]
+      properties:
+        type:
+          type: string
+          const: intent_slashed
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        reason:
+          type: string
+        seq:
+          $ref: "#/components/schemas/SeqField"
+
+    ReplayStartFrame:
+      type: object
+      required: [type, fromSeq, count]
+      properties:
+        type:
+          type: string
+          const: replay_start
+        fromSeq:
+          $ref: "#/components/schemas/SeqField"
+        count:
+          type: integer
+          minimum: 0
+
+    ReplayEndFrame:
+      type: object
+      required: [type, count]
+      properties:
+        type:
+          type: string
+          const: replay_end
+        count:
+          type: integer
+          minimum: 0
+
+    ReplayTooOldFrame:
+      type: object
+      required: [type, fromSeq, oldestAvailableSeq]
+      properties:
+        type:
+          type: string
+          const: replay_too_old
+        fromSeq:
+          $ref: "#/components/schemas/SeqField"
+        oldestAvailableSeq:
+          $ref: "#/components/schemas/SeqField"
+
+    # ── Client → server commands ────────────────────────────────────────────
+
+    SubscribeCommand:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          const: subscribe
+        chains:
+          type: array
+          items:
+            type: string
+          maxItems: 20
+          description: Chain identifiers to filter on (omit for all chains).
+        all:
+          type: boolean
+          description: When true, opt out of capability filtering entirely.
+
+    AuthCommand:
+      type: object
+      required: [type, solver, timestamp, signature]
+      properties:
+        type:
+          type: string
+          const: auth
+        solver:
+          $ref: "#/components/schemas/SolverAddress"
+        timestamp:
+          type: integer
+          description: Unix epoch seconds (must be within ±300 s of server time).
+        signature:
+          type: string
+          description: Base64-encoded Ed25519 signature over `auth:<solver>:<timestamp>`.
+
+    ReplayCommand:
+      type: object
+      required: [type, fromSeq]
+      properties:
+        type:
+          type: string
+          const: replay
+        fromSeq:
+          $ref: "#/components/schemas/SeqField"
+          description: Replay all events with seq > fromSeq.
+
+    # ── Domain models ───────────────────────────────────────────────────────
+
+    Intent:
+      type: object
+      required: [intentId, user, srcChain, srcAmount, state, createdAt, deadline]
+      properties:
+        intentId:
+          $ref: "#/components/schemas/IntentId"
+        user:
+          type: string
+        srcChain:
+          type: string
+          enum: [stellar, ethereum, base, polygon, arbitrum, optimism, avalanche]
+        srcAmount:
+          type: string
+          description: Source amount in base units (bigint as string).
+        minDstAmount:
+          type: string
+        quotedDstAmount:
+          type: string
+        solver:
+          type: string
+        state:
+          type: string
+          enum: [open, accepted, filled, cancelled, expired, slashed]
+        createdAt:
+          type: integer
+          description: Unix epoch seconds.
+        deadline:
+          type: integer
+          description: Unix epoch seconds.
+        filledAt:
+          type: integer
+        fillAmount:
+          type: string
+        txHash:
+          type: string

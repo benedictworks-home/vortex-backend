@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { SorobanRpc, Transaction } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, SorobanRpc, Transaction, xdr } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 
 @Injectable()
@@ -42,6 +42,9 @@ export class SorobanService {
    * the `{ header: { closeTime } }` shape the ingestion loop reads.
    */
   async getLedger(sequence: number): Promise<{ header?: { closeTime?: string } }> {
+    // `this.rpcUrl` is the operator-configured RPC endpoint from app config —
+    // the host is never attacker-controlled, so there is no SSRF surface here.
+    // eslint-disable-next-line no-restricted-syntax
     const response = await fetch(this.rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -70,6 +73,14 @@ export class SorobanService {
     return this.server.getEvents(request);
   }
 
+  /**
+   * Read raw ledger entries by key (contract-version probing reads a
+   * contract instance's WASM hash this way, with no simulation involved).
+   */
+  getLedgerEntries(...keys: xdr.LedgerKey[]): Promise<SorobanRpc.Api.GetLedgerEntriesResponse> {
+    return this.server.getLedgerEntries(...keys);
+  }
+
   getFeeStats(): Promise<SorobanRpc.Api.GetFeeStatsResponse> {
     return this.server.getFeeStats();
   }
@@ -86,7 +97,7 @@ export class SorobanService {
     return this.server.prepareTransaction(transaction) as Promise<Transaction>;
   }
 
-  submitTransaction(transaction: Transaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
+  submitTransaction(transaction: Transaction | FeeBumpTransaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
     return this.server.sendTransaction(transaction);
   }
 

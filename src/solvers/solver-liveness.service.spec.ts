@@ -207,7 +207,7 @@ describe("SolverLivenessService (issue #445)", () => {
     jest.setSystemTime(Date.now() + WINDOW_MS + 1_000);
     await svc.sweep();
     expect((await solvers.get(alpha.address))?.isActive).toBe(false);
-    feed.broadcast = makeFeed(); // fresh spies from here
+    feed.broadcast = jest.fn().mockResolvedValue(undefined); // fresh spy from here
 
     const ack = await svc.touch(alpha.address);
     expect(ack?.status).toBe("online");
@@ -236,7 +236,7 @@ describe("SolverLivenessService (issue #445)", () => {
     // What POST :address/deactivate and :address/deregister do before the
     // record can be heartbeated back to life.
     await svc.clearAutoOffline(alpha.address);
-    feed.broadcast = makeFeed();
+    feed.broadcast = jest.fn().mockResolvedValue(undefined);
 
     const ack = await svc.touch(alpha.address);
     expect(ack?.status).toBe("offline");
@@ -250,7 +250,7 @@ describe("SolverLivenessService (issue #445)", () => {
     await svc.touch(alpha.address);
     jest.setSystemTime(Date.now() + WINDOW_MS + 1_000);
     await svc.sweep();
-    feed.broadcast = makeFeed();
+    feed.broadcast = jest.fn().mockResolvedValue(undefined);
 
     const [first, second] = await Promise.all([svc.touch(alpha.address), svc.touch(alpha.address)]);
     expect(first?.status).toBe("online");

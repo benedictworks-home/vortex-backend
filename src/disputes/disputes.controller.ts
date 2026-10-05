@@ -17,7 +17,7 @@ import { SubmitDisputeDto } from "./dto/submit-dispute.dto";
 import { DecideDisputeDto } from "./dto/decide-dispute.dto";
 
 @ApiTags("disputes")
-@Controller("api/v1/solvers/disputes")
+@Controller({ path: "solvers/disputes", version: "1" })
 export class DisputesController {
   constructor(
     private readonly disputesService: DisputesService,

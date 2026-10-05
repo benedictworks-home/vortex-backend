@@ -65,8 +65,8 @@ export function buildMatchPredicate(solver: SolverRecord, isLive?: () => boolean
 
   return {
     solverAddress: solver.address,
-    supportedChains: [...supportedChains],
-    supportedTokens: [...supportedTokens],
+    supportedChains: [...solver.supportedChains],
+    supportedTokens: [...solver.supportedTokens],
     bondAmount: solver.bondAmount,
     matches(intent: Intent): boolean {
       if (isLive && !isLive()) return false;

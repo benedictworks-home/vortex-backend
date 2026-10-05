@@ -13,7 +13,7 @@ export class GuardianOverrideDto {
 }
 
 @ApiTags("governance")
-@Controller("api/v1/governance/guardian")
+@Controller({ path: "governance/guardian", version: "1" })
 export class GuardianController {
   constructor(private readonly guardian: GuardianService) {}
 

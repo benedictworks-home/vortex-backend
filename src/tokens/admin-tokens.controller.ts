@@ -14,7 +14,7 @@ import { CreateAdminTokenDto, DeleteAdminTokenDto, PatchAdminTokenDto } from "./
  */
 @ApiTags("admin")
 @ApiHeader({ name: "x-admin-key", required: true })
-@Controller("api/v1/admin/tokens")
+@Controller({ path: "admin/tokens", version: "1" })
 @UseGuards(AdminGuard)
 @RequireAdminRole("admin")
 export class AdminTokensController {

@@ -25,7 +25,7 @@ import { AbuseScoreService } from "./abuse-score.service";
 import { AbuseAuditEvent } from "./abuse.types";
 
 @ApiTags("abuse")
-@Controller("api/v1/abuse")
+@Controller({ path: "abuse", version: "1" })
 export class AbuseController {
   constructor(private readonly scorer: AbuseScoreService) {}
 

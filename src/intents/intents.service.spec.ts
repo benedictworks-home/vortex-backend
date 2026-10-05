@@ -411,6 +411,14 @@ describe("IntentsService", () => {
           deadline: 0,
           paramsVersion: 0,
           usdValueAtCreate: 0,
+          // Issue #385: stamped on every create (set on the onchain path,
+          // undefined otherwise) so both paths return the same shape.
+          pendingTxHash: "",
+          pendingOp: "",
+          // Issue #403: stamped on every create so the deposit-verification
+          // loop can distinguish pending intents from skipped/disabled ones.
+          srcVerified: false,
+          srcVerification: "",
         }).sort(),
       );
       expect(await svc.get(intent.intentId)).toBeDefined();

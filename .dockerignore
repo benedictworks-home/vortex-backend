@@ -1,6 +1,73 @@
+# ─── .dockerignore — Issue #491 hardened image ───────────────────────────────
+# Keep the build context minimal to speed up transfers and prevent secrets
+# from leaking into layers.
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Node / build artefacts
 node_modules
 dist
 coverage
-.git
+*.tsbuildinfo
+
+# Environment files — never bake secrets into the image
 .env
+.env.*
+!.env.example
+!.env.mainnet.example
+!.env.staging.example
+!.env.testnet.example
+
+# Logs
 *.log
+npm-debug.log*
+
+# Test / CI artefacts
+test
+__tests__
+*.spec.ts
+*.e2e-spec.ts
+jest.config.*
+.jest-cache
+stryker.conf.*
+mutation-report
+
+# Docker itself
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Editor / OS noise
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docs and repo metadata — not needed at runtime
+docs
+*.md
+!README.md
+CHANGELOG.md
+SECURITY.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+CODEOWNERS
+LICENSE
+
+# CI — not needed inside the image
+.github
+.semgrep
+.husky
+
+# Deploy charts — not baked into the image
+deploy
+
+# Temporary / profiling
+tmp
+.tmp
+*.heapsnapshot
+*.cpuprofile

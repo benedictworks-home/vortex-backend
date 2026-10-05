@@ -1,6 +1,14 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { IIntentsRepository, IntentSearchQuery, IntentSearchResult } from "./intents.repository";
+import {
+  IdempotentCreateResult,
+  IIntentsRepository,
+  IntentPatch,
+  IntentSearchQuery,
+  IntentSearchResult,
+  MutationResult,
+  VersionConflict,
+} from "./intents.repository";
 import { Intent, IntentState, StellarToken, TokenInfo } from "./intents.types";
 import { IntentState as PrismaIntentState, Prisma } from "@prisma/client";
 
@@ -33,6 +41,78 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return intent;
   }
 
+  /**
+   * Mirror a row only when the incoming record is strictly newer than what is
+   * stored (issue #405): a late-arriving out-of-order mirror write must never
+   * regress a row to an older `version`. A missing row is created; an equal or
+   * older version is dropped silently.
+   */
+  async saveIfNewer(intent: Intent): Promise<void> {
+    const data = this.toDbData(intent);
+    const updated = await this.prisma.intent.updateMany({
+      where: { intentId: intent.intentId, version: { lt: intent.version ?? 0 } },
+      data,
+    });
+    if (updated.count > 0) return;
+    const existing = await this.prisma.intent.findUnique({ where: { intentId: intent.intentId } });
+    if (existing) return; // stored version is equal or newer — keep it.
+    try {
+      await this.prisma.intent.create({ data: { ...data, intentId: intent.intentId } });
+    } catch (err) {
+      // P2002 = a concurrent writer created the row first; their version wins.
+      if ((err as Prisma.PrismaClientKnownRequestError).code !== "P2002") throw err;
+    }
+  }
+
+  /**
+   * Insert `intent` unless an intent created at or after `minCreatedAt`
+   * already holds `idempotencyKey` (issue #404). Atomic across replicas via
+   * the unique index on `idempotency_key`; a key held only by an intent older
+   * than the replay window is released and reused.
+   */
+  async createIdempotent(
+    intent: Intent,
+    idempotencyKey: string,
+    minCreatedAt: number,
+  ): Promise<IdempotentCreateResult> {
+    const replay = await this.findByIdempotencyKey(idempotencyKey, minCreatedAt);
+    if (replay) return { intent: replay, created: false };
+
+    await this.prisma.intent.updateMany({
+      where: { idempotencyKey, createdAt: { lt: minCreatedAt } },
+      data: { idempotencyKey: null },
+    });
+
+    try {
+      await this.prisma.intent.create({
+        data: { ...this.toDbData(intent), intentId: intent.intentId, idempotencyKey },
+      });
+      return { intent, created: true };
+    } catch (err) {
+      if ((err as Prisma.PrismaClientKnownRequestError).code === "P2002") {
+        const winner = await this.findByIdempotencyKey(idempotencyKey, minCreatedAt);
+        if (winner) return { intent: winner, created: false };
+      }
+      throw err;
+    }
+  }
+
+  /** Find the unexpired intent created with `idempotencyKey`, if any. */
+  async findByIdempotencyKey(idempotencyKey: string, minCreatedAt: number): Promise<Intent | undefined> {
+    const row = await this.prisma.intent.findFirst({
+      where: { idempotencyKey, createdAt: { gte: minCreatedAt } },
+    });
+    return row ? this.fromRow(row) : undefined;
+  }
+
+  /** Fetch several intents in one call; unknown IDs are omitted. */
+  async findManyByIds(ids: string[]): Promise<Intent[]> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return [];
+    const rows = await this.prisma.intent.findMany({ where: { intentId: { in: unique } } });
+    return rows.map((r) => this.fromRow(r));
+  }
+
   async findById(id: string): Promise<Intent | undefined> {
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : undefined;
@@ -60,6 +140,23 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       orderBy: { createdAt: "desc" },
     });
     return rows.map((r) => this.fromRow(r));
+  }
+
+  /** Number of intents currently `accepted` by `solver` (issue #405). */
+  async countAcceptedBySolver(solver: string): Promise<number> {
+    return this.prisma.intent.count({
+      where: { state: PrismaIntentState.accepted, solver },
+    });
+  }
+
+  /** Number of `open` or `accepted` intents owned by `user` (case-insensitive). */
+  async countActiveByUser(user: string): Promise<number> {
+    return this.prisma.intent.count({
+      where: {
+        user: { equals: user, mode: "insensitive" },
+        state: { in: [PrismaIntentState.open, PrismaIntentState.accepted] },
+      },
+    });
   }
 
   /**
@@ -135,18 +232,40 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return { intents: rows.map((r) => this.fromRow(r)), total };
   }
 
-  async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
-    try {
-      const row = await this.prisma.intent.update({
-        where: { intentId: id },
-        data: this.toDbPatch(patch),
-      });
-      return this.fromRow(row);
-    } catch (err) {
-      // P2025 = Record to update not found
-      if ((err as Prisma.PrismaClientKnownRequestError).code === "P2025") return null;
-      throw err;
-    }
+  /**
+   * Apply `patch` only if the stored version equals `expectedVersion`
+   * (issue #405): zero rows updated means the intent is absent (`null`) or
+   * another writer already bumped the version ({@link VersionConflict} with
+   * the version actually found, so the caller can re-read and retry).
+   */
+  async update(id: string, patch: IntentPatch, expectedVersion?: number): Promise<MutationResult> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, ...(expectedVersion !== undefined ? { version: expectedVersion } : {}) },
+      data: { ...this.toDbPatch(patch), version: { increment: 1 } },
+    });
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Amend the user-adjustable fields of an `open` intent whose existing
+   * deadline is still in the future (issue #569). The state + deadline
+   * predicates make the write race-free; `version` is intentionally not
+   * bumped (an amend widens terms, it does not compete with solver writes).
+   */
+  async amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now = Math.floor(Date.now() / 1000),
+  ): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: { intentId: id, state: PrismaIntentState.open, deadline: { gt: now } },
+      data: { minDstAmount: patch.minDstAmount, deadline: patch.deadline },
+    });
+    if (result.count === 0) return null;
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
   }
 
   async delete(id: string): Promise<boolean> {
@@ -175,20 +294,25 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     solver: string,
     newDeadline: number,
     now?: number,
-    acceptedDstAmount?: string,
-  ): Promise<Intent | null> {
+    expectedVersion?: number,
+  ): Promise<MutationResult> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const result = await this.prisma.intent.updateMany({
-      where: { intentId: id, state: PrismaIntentState.open, deadline: { gt: nowSec } },
+      where: {
+        intentId: id,
+        state: PrismaIntentState.open,
+        deadline: { gt: nowSec },
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
+      },
       data: {
         state: PrismaIntentState.accepted,
         solver,
         deadline: newDeadline,
-        ...(acceptedDstAmount !== undefined ? { acceptedDstAmount } : {}),
+        version: { increment: 1 },
       },
     });
 
-    if (result.count === 0) return null; // not found, already taken, or expired
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     // Fetch the updated row to return the full intent shape.
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
@@ -234,7 +358,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
     now?: number,
-  ): Promise<Intent | null> {
+    expectedVersion?: number,
+  ): Promise<MutationResult> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const result = await this.prisma.intent.updateMany({
       where: {
@@ -242,9 +367,11 @@ export class PrismaIntentsRepository implements IIntentsRepository {
         state: PrismaIntentState.accepted,
         solver,
         deadline: { gt: nowSec },
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
       },
       data: {
         state: PrismaIntentState.filled,
+        version: { increment: 1 },
         ...(patch.filledAt !== undefined ? { filledAt: patch.filledAt } : {}),
         ...(patch.fillAmount !== undefined ? { fillAmount: patch.fillAmount } : {}),
         ...(patch.feeAmount !== undefined
@@ -254,7 +381,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       },
     });
 
-    if (result.count === 0) return null; // guard failed
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
@@ -288,13 +415,17 @@ export class PrismaIntentsRepository implements IIntentsRepository {
    * Atomically cancel an intent only when it is currently `open`. Guards
    * against a concurrent solver accept() or sweeper expiry on the same intent.
    */
-  async cancelIfOpen(id: string): Promise<Intent | null> {
+  async cancelIfOpen(id: string, expectedVersion?: number): Promise<MutationResult> {
     const result = await this.prisma.intent.updateMany({
-      where: { intentId: id, state: PrismaIntentState.open },
-      data: { state: PrismaIntentState.cancelled },
+      where: {
+        intentId: id,
+        state: PrismaIntentState.open,
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
+      },
+      data: { state: PrismaIntentState.cancelled, version: { increment: 1 } },
     });
 
-    if (result.count === 0) return null;
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
@@ -304,13 +435,17 @@ export class PrismaIntentsRepository implements IIntentsRepository {
    * Atomically expire an intent only when it is currently `open`. Used by the
    * sweeper so a concurrent user cancel() or solver accept() always wins the race.
    */
-  async expireIfOpen(id: string): Promise<Intent | null> {
+  async expireIfOpen(id: string, expectedVersion?: number): Promise<MutationResult> {
     const result = await this.prisma.intent.updateMany({
-      where: { intentId: id, state: PrismaIntentState.open },
-      data: { state: PrismaIntentState.expired },
+      where: {
+        intentId: id,
+        state: PrismaIntentState.open,
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
+      },
+      data: { state: PrismaIntentState.expired, version: { increment: 1 } },
     });
 
-    if (result.count === 0) return null;
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
@@ -323,13 +458,23 @@ export class PrismaIntentsRepository implements IIntentsRepository {
   async slashIfAccepted(
     id: string,
     patch: { slashedAt: number; slashReason: string },
-  ): Promise<Intent | null> {
+    expectedVersion?: number,
+  ): Promise<MutationResult> {
     const result = await this.prisma.intent.updateMany({
-      where: { intentId: id, state: PrismaIntentState.accepted },
-      data: { state: PrismaIntentState.slashed },
+      where: {
+        intentId: id,
+        state: PrismaIntentState.accepted,
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
+      },
+      data: {
+        state: PrismaIntentState.slashed,
+        version: { increment: 1 },
+        slashedAt: patch.slashedAt,
+        slashReason: patch.slashReason,
+      },
     });
 
-    if (result.count === 0) return null;
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
@@ -341,23 +486,44 @@ export class PrismaIntentsRepository implements IIntentsRepository {
    * is already long enough, so repeated sweep cycles cannot creep the deadline
    * forward indefinitely.
    */
-  async extendDeadlineIfAccepted(id: string, newDeadline: number): Promise<Intent | null> {
+  async extendDeadlineIfAccepted(
+    id: string,
+    newDeadline: number,
+    expectedVersion?: number,
+  ): Promise<MutationResult> {
     const result = await this.prisma.intent.updateMany({
       where: {
         intentId: id,
         state: PrismaIntentState.accepted,
         deadline: { lt: newDeadline },
+        ...(expectedVersion !== undefined ? { version: expectedVersion } : {}),
       },
-      data: { deadline: newDeadline },
+      data: { deadline: newDeadline, version: { increment: 1 } },
     });
 
-    if (result.count === 0) return null;
+    if (result.count === 0) return this.resolveMiss(id, expectedVersion);
 
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
   }
 
   // ── Private helpers ────────────────────────────────────────────────────────
+
+  /**
+   * Classify a zero-row conditional update (issue #405): a stale
+   * `expectedVersion` becomes a {@link VersionConflict} carrying the version
+   * actually found so callers can re-read and retry; anything else (absent row
+   * or failed state guard) is `null`. Mirrors the in-memory adapter's
+   * ordering — the version check is reported before the state guard.
+   */
+  private async resolveMiss(id: string, expectedVersion?: number): Promise<MutationResult> {
+    if (expectedVersion === undefined) return null;
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    if (row && row.version !== expectedVersion) {
+      return new VersionConflict(id, expectedVersion, row.version);
+    }
+    return null;
+  }
 
   /** Map Intent → Prisma create/update data (omits intentId which is the key). */
   private toDbData(
@@ -386,6 +552,12 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       fillVerificationState: intent.fillVerificationState ?? null,
       fillVerificationReason: intent.fillVerificationReason ?? null,
       fillVerifiedAt: intent.fillVerifiedAt ? new Date(intent.fillVerifiedAt) : null,
+      version: intent.version ?? 0,
+      srcVerified: intent.srcVerified ?? false,
+      srcTxHash: intent.srcTxHash ?? null,
+      srcVerification: (intent.srcVerification ?? null) as unknown as Prisma.InputJsonValue,
+      ...(intent.slashedAt !== undefined ? { slashedAt: intent.slashedAt } : {}),
+      ...(intent.slashReason !== undefined ? { slashReason: intent.slashReason } : {}),
     };
 
     if (intent.feeAmount !== undefined) {
@@ -411,6 +583,12 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
     if (patch.minDstAmount !== undefined) data.minDstAmount = patch.minDstAmount;
+    if (patch.srcVerified !== undefined) data.srcVerified = patch.srcVerified;
+    if (patch.srcTxHash !== undefined) data.srcTxHash = patch.srcTxHash;
+    if (patch.srcVerification !== undefined) {
+      (data as Prisma.IntentUpdateInput & { srcVerification?: Prisma.InputJsonValue | null }).srcVerification =
+        (patch.srcVerification ?? null) as unknown as Prisma.InputJsonValue;
+    }
     if (patch.usdValueAtCreate !== undefined) data.usdValueAtCreate = patch.usdValueAtCreate;
     if (patch.auction !== undefined) {
       (data as Prisma.IntentUpdateInput & { auction?: Prisma.InputJsonValue }).auction =
@@ -420,10 +598,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       (data as Prisma.IntentUpdateInput & { acceptedDstAmount?: string | null }).acceptedDstAmount =
         patch.acceptedDstAmount ?? null;
     }
-    if ("slashedAt" in patch && patch.slashedAt !== undefined) {
-      // slashedAt / slashReason are not Prisma schema columns yet; ignore silently
-      // until the schema migration lands (issue #62).
-    }
+    if (patch.slashedAt !== undefined) data.slashedAt = patch.slashedAt;
+    if (patch.slashReason !== undefined) data.slashReason = patch.slashReason;
     return data;
   }
 
@@ -448,9 +624,16 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     feeAmount?: string | null;
     txHash: string | null;
     usdValueAtCreate?: number | null;
-    fillVerificationState?: "pending" | "verified" | "rejected" | null;
+    /** Prisma maps this to a plain string column; narrowed on return. */
+    fillVerificationState?: string | null;
     fillVerificationReason?: string | null;
     fillVerifiedAt?: Date | null;
+    version: number;
+    srcVerified: boolean;
+    srcTxHash: string | null;
+    srcVerification: Prisma.JsonValue | null;
+    slashedAt?: number | null;
+    slashReason?: string | null;
   }): Intent {
     return {
       intentId: row.intentId,
@@ -474,9 +657,22 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.usdValueAtCreate !== null && row.usdValueAtCreate !== undefined
         ? { usdValueAtCreate: row.usdValueAtCreate }
         : {}),
-      ...(row.fillVerificationState ? { fillVerificationState: row.fillVerificationState } : {}),
+      ...(row.fillVerificationState
+        ? {
+            fillVerificationState:
+              row.fillVerificationState as Intent["fillVerificationState"],
+          }
+        : {}),
       ...(row.fillVerificationReason ? { fillVerificationReason: row.fillVerificationReason } : {}),
       ...(row.fillVerifiedAt ? { fillVerifiedAt: row.fillVerifiedAt.toISOString() } : {}),
+      version: row.version,
+      srcVerified: row.srcVerified,
+      ...(row.srcTxHash !== null ? { srcTxHash: row.srcTxHash } : {}),
+      ...(row.srcVerification !== null
+        ? { srcVerification: row.srcVerification as unknown as Intent["srcVerification"] }
+        : {}),
+      ...(row.slashedAt !== null && row.slashedAt !== undefined ? { slashedAt: row.slashedAt } : {}),
+      ...(row.slashReason !== null && row.slashReason !== undefined ? { slashReason: row.slashReason } : {}),
     };
   }
 

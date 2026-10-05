@@ -1,5 +1,6 @@
 import { Asset } from "@stellar/stellar-sdk";
 import { FillVerifierService } from "./fill-verifier.service";
+import { HttpEgressService } from "../common/http-egress";
 import { NETWORK_PASSPHRASES } from "../config/configuration";
 import { Intent } from "../intents/intents.types";
 
@@ -14,25 +15,37 @@ describe("FillVerifierService", () => {
     get: (key: string) => key === "stellar.network" ? "testnet" : "https://horizon.test",
   } as never;
   const service = new FillVerifierService(config);
-  const originalFetch = global.fetch;
 
-  afterEach(() => { global.fetch = originalFetch; });
+  // Horizon traffic goes through HttpEgressService (the SSRF-guarded transport
+  // enforced by lint), so the egress layer is spied and fed queued Response
+  // fixtures instead of mocking global fetch.
+  const queued: Response[] = [];
+  const fetchSpy = jest.spyOn(HttpEgressService.prototype, "fetch");
+  fetchSpy.mockImplementation(async () => {
+    const next = queued.shift();
+    if (!next) throw new Error("no queued Horizon response");
+    return { statusCode: next.status, headers: {}, body: await next.text(), bodyBytes: 0, finalUrl: "", ipUsed: "" };
+  });
+
+  afterEach(() => { queued.length = 0; });
+  afterAll(() => { fetchSpy.mockRestore(); });
 
   it("uses the delivered amount for path payments before verifying the minimum", async () => {
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({
+    queued.push(
+      new Response(JSON.stringify({
         successful: true,
         memo_type: "text",
         memo: intent.intentId,
         _links: { operations: { href: "ignored" } },
-      }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ _embedded: { records: [{
+      }), { status: 200 }),
+      new Response(JSON.stringify({ _embedded: { records: [{
         type: "path_payment_strict_send",
         to: intent.user,
         asset_type: "native",
         destination_amount: "1.3",
         amount: "2.0",
-      }] } }), { status: 200 }));
+      }] } }), { status: 200 }),
+    );
 
     await expect(service.verify("a".repeat(64), intent)).resolves.toEqual({
       status: "verified",
@@ -42,7 +55,7 @@ describe("FillVerifierService", () => {
   });
 
   it("keeps a transaction not yet indexed by Horizon retryable", async () => {
-    global.fetch = jest.fn().mockResolvedValueOnce(new Response("{}", { status: 404 }));
+    queued.push(new Response("{}", { status: 404 }));
     await expect(service.verify("b".repeat(64), intent)).resolves.toEqual({
       status: "pending",
       reason: "not_indexed",
@@ -50,7 +63,7 @@ describe("FillVerifierService", () => {
   });
 
   it("rejects a successful transaction without the intent binding memo", async () => {
-    global.fetch = jest.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+    queued.push(new Response(JSON.stringify({
       successful: true,
       memo_type: "text",
       memo: "another-intent",

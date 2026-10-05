@@ -27,14 +27,9 @@ const validCreateBody = {
 
 describe("Concurrent idempotent create race load test", () => {
   let app: INestApplication;
-  let baseUrl: string;
 
   beforeAll(async () => {
     app = await createTestApp();
-    // Bind once: an unbound server makes supertest open a listener per
-    // request, which resets connections under concurrency.
-    await app.listen(0, "127.0.0.1");
-    baseUrl = (await app.getUrl()).replace("[::1]", "127.0.0.1");
   });
 
   afterAll(async () => {
@@ -47,7 +42,7 @@ describe("Concurrent idempotent create race load test", () => {
 
     const results = await Promise.allSettled(
       Array.from({ length: concurrency }, () =>
-        request(baseUrl)
+        request(app.getHttpServer())
           .post("/api/v1/intents")
           .send({ ...validCreateBody, idempotencyKey }),
       ),
@@ -64,7 +59,7 @@ describe("Concurrent idempotent create race load test", () => {
 
     const [intentId] = [...intentIds];
     const listed = (
-      await request(baseUrl).get("/api/v1/intents").expect(200)
+      await request(app.getHttpServer()).get("/api/v1/intents").expect(200)
     ).body.intents as Array<{ intentId: string }>;
     const matches = listed.filter((i) => i.intentId === intentId);
     expect(matches).toHaveLength(1);
@@ -75,7 +70,7 @@ describe("Concurrent idempotent create race load test", () => {
 
     const results = await Promise.all(
       Array.from({ length: concurrency }, () =>
-        request(baseUrl)
+        request(app.getHttpServer())
           .post("/api/v1/intents")
           .send({ ...validCreateBody, idempotencyKey: randomUUID() })
           .expect(201),

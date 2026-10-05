@@ -1,6 +1,7 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nestjs/common";
 import { Observable, finalize } from "rxjs";
 import { MetricsService } from "./metrics.service";
+import { getApiVersionFromUrl } from "../common/api-versioning";
 
 @Injectable()
 export class MetricsInterceptor implements NestInterceptor {
@@ -12,6 +13,8 @@ export class MetricsInterceptor implements NestInterceptor {
     const start = Date.now();
     const method = request.method;
     const route = request.route?.path || request.originalUrl || request.url || "unknown";
+    const apiVersion = getApiVersionFromUrl(request.originalUrl ?? request.url ?? "");
+    const version = apiVersion === "unversioned" ? apiVersion : `v${apiVersion}`;
 
     return next.handle().pipe(
       // finalize (not tap) so 5xx thrown as exceptions are still counted.
@@ -19,12 +22,13 @@ export class MetricsInterceptor implements NestInterceptor {
         const statusCode = response.statusCode ?? 500;
         const duration = (Date.now() - start) / 1000;
 
-        this.metricsService.httpRequestTotal.inc({ method, route, status_code: statusCode });
-        this.metricsService.httpRequestDuration.observe({ method, route, status_code: statusCode }, duration);
+        const labels = { method, route, status_code: statusCode, version };
+        this.metricsService.httpRequestTotal.inc(labels);
+        this.metricsService.httpRequestDuration.observe(labels, duration);
         if (statusCode >= 500) {
-          this.metricsService.httpRequestErrors.inc({ method, route, status_code: statusCode });
+          this.metricsService.httpRequestErrors.inc(labels);
         }
-        if (route.includes("/api/v1/intents") && method === "POST") {
+        if (apiVersion === "1" && method === "POST" && /^\/api\/v1\/intents(?:\?|$)/.test(request.originalUrl ?? "")) {
           this.metricsService.observeIntentCreate(duration);
         }
       }),

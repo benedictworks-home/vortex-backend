@@ -47,7 +47,7 @@ export class DualWriteIntentsRepository implements IIntentsRepository {
     let loadedFromPostgres = 0;
     for (const intent of fromDb) {
       const local = this.primary.findById(intent.intentId);
-      if (!local || local.version < intent.version) {
+      if (!local || (local.version ?? 0) < (intent.version ?? 0)) {
         this.primary.save(intent);
         loadedFromPostgres++;
       }
@@ -116,8 +116,18 @@ export class DualWriteIntentsRepository implements IIntentsRepository {
     return this.primary.countActiveByUser(user);
   }
 
-  update(id: string, patch: IntentPatch, expectedVersion: number): Promise<MutationResult> {
+  update(id: string, patch: IntentPatch, expectedVersion?: number): Promise<MutationResult> {
     return this.mirrored("update", this.primary.update(id, patch, expectedVersion));
+  }
+
+  async amendIfOpen(
+    id: string,
+    patch: Pick<Intent, "minDstAmount" | "deadline">,
+    now?: number,
+  ): Promise<Intent | null> {
+    const amended = this.primary.amendIfOpen(id, patch, now);
+    if (amended) await this.mirror("amendIfOpen", amended);
+    return amended;
   }
 
   /**

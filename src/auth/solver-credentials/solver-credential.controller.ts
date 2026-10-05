@@ -28,7 +28,7 @@ import { SolverJwtGuard } from "./solver-jwt.guard";
  * Credentials can only be minted for the authenticated solver.
  */
 @ApiTags("solvers")
-@Controller("api/v1/solvers/:address/credentials")
+@Controller({ path: "solvers/:address/credentials", version: "1" })
 @UseGuards(SolverJwtGuard)
 export class SolverCredentialController {
   constructor(private readonly credentials: SolverCredentialService) {}
