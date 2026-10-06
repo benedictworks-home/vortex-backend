@@ -148,6 +148,112 @@ where $\text{SuccessRate} = \frac{\text{fillsCompleted}}{\text{fillsCompleted} +
 
 ---
 
+## 2a. SEP-10 Bot Authentication (Short-Lived Session Tokens)
+
+Bots authenticate to the API and the WebSocket feed with a SEP-10-style
+challenge instead of a long-lived shared secret. You request a challenge,
+sign it with your solver account key(s), and exchange it for a **15-minute
+EdDSA session token** (`issue #442`). Signed-message endpoints from
+§3b (`accept`/`fill` signatures) are unchanged — this flow only governs
+*connection* authentication (WebSocket feed, scoped credential endpoints).
+
+### Step 1 — Request a challenge
+
+```
+GET /api/v1/auth/challenge?account=G...
+```
+
+```bash
+curl "$BACKEND_URL/api/v1/auth/challenge?account=$SOLVER_ADDRESS"
+```
+
+```json
+{
+  "transaction": "AAAAAgAAAAB...base64XDR...",
+  "network_passphrase": "Test SDF Network ; September 2015"
+}
+```
+
+The transaction is a server-signed SEP-10 challenge: a `manageData`
+operation `<home-domain> auth` carrying a single-use 48-byte nonce (source =
+your account), a `web_auth_domain` operation, and 5-minute time bounds.
+
+### Step 2 — Sign and exchange
+
+Sign the transaction with the account's key(s) — for multisig accounts, sign
+with enough signers to meet the account's **medium threshold** (floored at
+1) — then POST the signed XDR back:
+
+```bash
+curl -X POST "$BACKEND_URL/api/v1/auth/token" \
+  -H "Content-Type: application/json" \
+  -d "{\"transaction\": \"$SIGNED_CHALLENGE_XDR\"}"
+```
+
+```json
+{
+  "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+```
+
+The JWT carries `sub` (your G-address), `role` (`solver` when the account is
+registered, `user` otherwise, `admin` for accounts listed in
+`SEP10_ADMIN_ACCOUNTS`), `iat`, and `exp`. It is signed with the Ed25519 key
+`SEP10_JWT_SIGNING_KEY` (never with the Soroban signer key).
+
+**Each challenge is single-use.** A captured challenge cannot be exchanged
+twice; failed exchanges (bad signature, wrong threshold) do not consume it.
+A challenge is valid for 5 minutes (+300s clock-drift grace); after that,
+request a fresh one. There is no refresh token — simply re-run the flow when
+you receive a `401` or `auth_error`.
+
+### Using the token
+
+- **REST**: `Authorization: Bearer <token>` on guarded endpoints (e.g. the
+  solver-scoped credential routes).
+- **WebSocket**: pass the token at handshake as `ws://host/ws?token=<token>`
+  (or an `Authorization: Bearer` header), **or** as the first message after
+  connecting:
+
+```json
+{ "type": "auth", "token": "<token>" }
+```
+
+On success the gateway binds your solver identity to the connection
+(capability-filtered snapshot, `auth_ok`); on failure it replies with
+`{ "type": "auth_error", "reason": "..." }`. Legacy HS256 tokens signed with
+`AUTH_JWT_SECRET` remain accepted during migration.
+
+### Key management
+
+```bash
+# Generate the JWT signing key (keep it out of version control):
+openssl genpkey -algorithm ed25519 -out sep10-jwt.pem
+# Base64 DER also works:
+openssl genpkey -algorithm ed25519 | tail -n +2 | tr -d '\n'
+```
+
+| Env var | Purpose |
+|---|---|
+| `STELLAR_SIGNER_SECRET_KEY` | Server keypair that signs challenges (reuse of the existing Soroban signer config). |
+| `SEP10_JWT_SIGNING_KEY` | Ed25519 PKCS#8 key signing the session JWTs. **Required in production.** |
+| `SEP10_HOME_DOMAIN` | Home domain embedded in challenges (default `localhost`). |
+| `SEP10_ADMIN_ACCOUNTS` | Comma-separated G-addresses issued `role=admin`. |
+| `SEP10_NONCE_STORE` | `memory` (default, single replica) or `redis` (multi-replica replay protection). |
+
+Notes:
+
+- The client account must exist on the network (unfunded/pre-authorized
+  accounts are out of scope for solver auth).
+- Deployments with more than one replica **must** set `SEP10_NONCE_STORE=redis`,
+  otherwise a challenge issued by one replica could be replayed on another.
+- The challenge's `web_auth_domain` and `<domain> auth` key both come from
+  `SEP10_HOME_DOMAIN`; set it to your real API domain in production.
+
+---
+
 ## 3. Bot Connection, Authentication & WebSocket Topics
 
 ### Connecting to the Real-Time Feed

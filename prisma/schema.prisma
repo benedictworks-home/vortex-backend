@@ -184,6 +184,7 @@ model Intent {
   // express WHERE clauses on indexes).
   @@index([srcTokenId, createdAt(sort: Desc)], name: "intents_volume_by_token_idx")
   @@index([dstTokenId, createdAt(sort: Desc)], name: "intents_volume_by_dst_token_idx")
+  @@index([solver])
   @@map("intents")
 
 }

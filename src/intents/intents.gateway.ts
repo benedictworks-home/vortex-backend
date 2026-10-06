@@ -22,6 +22,12 @@ import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
 } from "../config/limits.config";
+import { ConfigService } from "@nestjs/config";
+import type { IncomingMessage } from "http";
+import configuration, { AppConfig } from "../config/configuration";
+import { sep10JwtPublicKey } from "../auth/sep10/sep10-keys";
+import { verifyEddsaJwt, verifyHs256Jwt } from "../common/jwt";
+import type { KeyObject } from "node:crypto";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -152,6 +158,9 @@ export class IntentsGateway
   private readonly authenticatedSolver = new WeakMap<WebSocket, string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
+  private readonly jwtSecret: string;
+  /** Public half of `SEP10_JWT_SIGNING_KEY` — verifies SEP-10 session JWTs (#442). */
+  private readonly sep10PublicKey: KeyObject | null;
   private nextSeq = 1;
   /** True once graceful connection draining has begun (issue #511). */
   private draining = false;
@@ -189,9 +198,21 @@ export class IntentsGateway
      * gateway directly — still run; it only supplies backplane health detail.
      */
     @Optional() private readonly feed?: IntentFeedService,
+    /**
+     * App config (issue #442): resolves `AUTH_JWT_SECRET` and the SEP-10
+     * signing keys for handshake JWT authentication. Optional so direct
+     * unit-harness construction keeps working.
+     */
+    @Optional() config?: ConfigService<AppConfig, true>,
   ) {
     this.replayStore = replayStoreParam ?? null;
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+    const defaults = configuration();
+    this.jwtSecret = config?.get("authJwtSecret", { infer: true }) ?? defaults.authJwtSecret;
+    this.sep10PublicKey = sep10JwtPublicKey(
+      config?.get("stellar.signerSecretKey", { infer: true }) ?? defaults.stellar.signerSecretKey,
+      config?.get("sep10JwtSigningKey", { infer: true }) ?? defaults.sep10JwtSigningKey,
+    );
     this.backplane = this.createBackplane();
     if (this.backplane) {
       this.backplane.subscribe((event) => {
@@ -359,7 +380,18 @@ export class IntentsGateway
     }
   }
 
-  handleConnection(client: WebSocket) {
+  /** JWT from `?token=` or `Authorization: Bearer` on the upgrade request. */
+  private static bearerToken(request?: IncomingMessage): string | null {
+    const auth = request?.headers?.authorization;
+    if (auth?.startsWith("Bearer ")) return auth.slice(7).trim();
+    try {
+      return new URL(request?.url ?? "", "http://localhost").searchParams.get("token");
+    } catch {
+      return null;
+    }
+  }
+
+  handleConnection(client: WebSocket, request?: IncomingMessage) {
     // Graceful shutdown: refuse new clients once draining has begun (issue #511).
     if (this.draining) {
       client.close(1001, "Server draining");
@@ -391,6 +423,12 @@ export class IntentsGateway
     });
     this.alive.set(client, true);
     this.metricsService?.incWsConnection();
+
+    // Connection-level auth (issue #442): optional SEP-10 session JWT at the
+    // handshake. Anonymous connections stay allowed — auth only upgrades the
+    // feed scope. The same JWT can arrive as the first `auth` message instead.
+    const handshakeToken = IntentsGateway.bearerToken(request);
+    if (handshakeToken) void this.authenticateJwt(client, handshakeToken);
 
     client.on("message", (raw) => {
       void this.handleMessage(client, raw);
@@ -710,6 +748,11 @@ export class IntentsGateway
    * `updateSolverPredicate()` directly — no reconnect required.
    */
   private async handleAuth(client: WebSocket, payload: Record<string, unknown>) {
+    // SEP-10 session JWT handshake (issue #442): `{"type":"auth","token":"..."}`.
+    if (typeof payload.token === "string") {
+      await this.authenticateJwt(client, payload.token);
+      return;
+    }
     const solver = typeof payload.solver === "string" ? payload.solver : "";
     const timestamp = payload.timestamp;
     const signature = typeof payload.signature === "string" ? payload.signature : "";
@@ -739,7 +782,41 @@ export class IntentsGateway
       return;
     }
 
-    // Build capability predicate and store it on the connection.
+    await this.installSolver(client, solverRecord, "signature");
+  }
+
+  /**
+   * Authenticates with a session JWT from the SEP-10 flow (issue #442/#455).
+   *
+   * EdDSA tokens issued by `POST /api/v1/auth/token` are tried first; the
+   * legacy HS256 token (`AUTH_JWT_SECRET`) remains accepted so existing
+   * deployments keep working.
+   */
+  private async authenticateJwt(client: WebSocket, token: string): Promise<void> {
+    const claims =
+      (this.sep10PublicKey ? verifyEddsaJwt(token, this.sep10PublicKey) : null) ??
+      verifyHs256Jwt(token, this.jwtSecret);
+    if (!claims) {
+      client.send(JSON.stringify({ type: "auth_error", reason: "invalid or expired token" }));
+      return;
+    }
+    const solverRecord = await this.solversService.get(claims.sub);
+    if (!solverRecord || !solverRecord.isActive) {
+      client.send(JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
+      return;
+    }
+    await this.installSolver(client, solverRecord, "jwt");
+  }
+
+  /**
+   * Binds a verified solver identity to the connection and sends its scoped snapshot.
+   */
+  private async installSolver(
+    client: WebSocket,
+    solverRecord: NonNullable<Awaited<ReturnType<SolversService["get"]>>>,
+    method: "signature" | "jwt",
+  ): Promise<void> {
+    const solver = solverRecord.address;
     const predicate = buildMatchPredicate(solverRecord);
     this.authenticatedSolver.set(client, solver);
     const authFilter = this.subscribers.get(client);
@@ -766,7 +843,7 @@ export class IntentsGateway
       // Non-fatal — solver can fall back to GET /solvers/:address/eligible-intents.
     }
 
-    logger.info(`ws solver auth ok: address=${solver} chains=${solverRecord.supportedChains.join(",")} tokens=${solverRecord.supportedTokens.join(",")}`);
+    logger.info(`ws solver auth ok: address=${solver} method=${method} chains=${solverRecord.supportedChains.join(",")} tokens=${solverRecord.supportedTokens.join(",")}`);
   }
 
   /**

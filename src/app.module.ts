@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
-import { ThrottlerModule, ThrottlerGuard } from "@nestjs/throttler";
+import { ThrottlerModule } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
 import { ConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
@@ -21,10 +21,17 @@ import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { AbuseModule } from "./abuse/abuse.module";
+import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
+import { Sep10Module } from "./auth/sep10/sep10.module";
+import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
 
 @Module({
   imports: [
-    // Issue #44 — global rate limit: 100 requests per 60 s per IP
+    // ThrottlerModule stays for the per-user intent guard (#45) and the
+    // per-route @Throttle decorators (quote). The GLOBAL IP throttle it used
+    // to provide is replaced by the tiered, distributed TieredThrottleGuard
+    // (issue #441) — see the APP_GUARD provider below.
     ThrottlerModule.forRoot([
       {
         name: "global",
@@ -36,6 +43,11 @@ import { DatasetsModule } from "./datasets/datasets.module";
     ScheduleModule.forRoot(),
     ConfigModule,
     PrismaModule,
+    // Issue #441 — API key tiers + distributed rate limiting.
+    ApiKeysModule,
+    // Issue #442 — SEP-10 challenge auth: challenge/token endpoints plus the
+    // key material the WS gateway and JWT guards use to verify issued tokens.
+    Sep10Module,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
     // for the whole app. Must be imported once in the root module or the global
     // providers never become visible to other modules (e.g. IntentsSweeperService)
@@ -54,6 +66,7 @@ import { DatasetsModule } from "./datasets/datasets.module";
     JobsModule,
     FlagsModule,
     GuardianStateModule,
+    AbuseModule,
     HealthModule,
     TokensModule,
     IntentsModule,
@@ -66,10 +79,14 @@ import { DatasetsModule } from "./datasets/datasets.module";
   ],
   controllers: [],
   providers: [
-    // Apply the IP-based throttle globally to every route
+    // Issue #441 — tiered, distributed rate limit replaces the legacy
+    // per-process global IP throttle. Anonymous requests are limited to the
+    // `public` tier (100/min per IP — unchanged); API-key requests are limited
+    // by their tier. Enforced by the Redis-backed DistributedRateLimiter with
+    // a bounded local fallback, so a Redis outage never means unlimited.
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: TieredThrottleGuard,
     },
   ],
 })

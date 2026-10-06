@@ -107,3 +107,8 @@ export const SorobanDataBuilder = real.SorobanDataBuilder;
 export const authorizeEntry = real.authorizeEntry;
 export const decodeAddressToScVal = real.decodeAddressToScVal;
 export const encodeAddressToScVal = real.encodeAddressToScVal;
+// SEP-10 challenge builders/verifiers (issue #442) — genuine SDK, only
+// SorobanRpc is stubbed above.
+export const WebAuth = real.WebAuth;
+export const Utils = real.Utils;
+export const Config = real.Config;

@@ -482,6 +482,25 @@ export const envValidationSchema = Joi.object({
   // JWT auth; signature auth keeps working.
   AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
 
+  // ── SEP-10 solver authentication (issue #442) ──────────────────────────────
+  // Home domain embedded in the challenge (`<domain> auth` manage-data key).
+  // The same value is used for the challenge's `web_auth_domain` operation.
+  SEP10_HOME_DOMAIN: Joi.string().min(1).default("localhost"),
+  // Ed25519 PKCS#8 private key signing the short-lived session JWTs (distinct
+  // from the Soroban signer key). Required in production: an ephemeral dev key
+  // cannot verify tokens on another replica or after a restart.
+  SEP10_JWT_SIGNING_KEY: Joi.when("NODE_ENV", {
+    is: "production",
+    then: Joi.string().required(),
+    otherwise: Joi.string().allow("").default(""),
+  }),
+  // Comma-separated G-addresses issued role=admin. Empty = nobody.
+  SEP10_ADMIN_ACCOUNTS: Joi.string().allow("").default(""),
+  // Backing store for single-use challenge nonces. Use `redis` in any
+  // multi-replica deployment — with `memory` a captured challenge can be
+  // replayed against a replica that has not seen it yet.
+  SEP10_NONCE_STORE: Joi.string().valid("memory", "redis").default("memory"),
+
   // ── Distributed rate limiting (issue #441) ─────────────────────────────────
   // How often the local rate-limiter fallback prunes expired window entries.
   // Only relevant during a Redis outage; keeps the fallback map bounded.

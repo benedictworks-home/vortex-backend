@@ -18,6 +18,9 @@ const PROD_ENV = {
   NODE_ENV: "production",
   ONCHAIN_DRY_RUN: true,
   SOROBAN_SIGNING_KEY: VALID_KEY,
+  // Required in production since issue #442 made SEP-10 session signing
+  // mandatory — the fixture must carry it for any production validation.
+  SEP10_JWT_SIGNING_KEY: VALID_KEY,
   KILLSWITCH_OPERATOR_TOKEN: "operator-secret",
   METRICS_TOKEN: "a-sufficiently-long-metrics-secret",
 };
